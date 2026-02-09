@@ -1,0 +1,24 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+.pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Env files
+.env
+
+# Data/artifacts
+data/
+.tmp/
+
+# Local PDF drop folder (keep README in git, ignore PDFs)
+docs/**/*.pdf
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
