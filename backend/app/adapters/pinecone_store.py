@@ -14,6 +14,10 @@ logger = logging.getLogger(__name__)
 class PineconeVectorStore:
     def __init__(self, settings: Settings):
         self.settings = settings
+        if not getattr(settings, "pinecone_api_key", None):
+            raise RuntimeError("PINECONE_API_KEY is not configured")
+        if not getattr(settings, "pinecone_index", None):
+            raise RuntimeError("PINECONE_INDEX is not configured")
         self.client = Pinecone(api_key=settings.pinecone_api_key)
         if settings.pinecone_host:
             self.index = self.client.Index(settings.pinecone_index, host=settings.pinecone_host)

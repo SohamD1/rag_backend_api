@@ -30,6 +30,8 @@ def check_dependencies(settings: Settings) -> Dict[str, Any]:
     checks: Dict[str, Dict[str, Any]] = {}
 
     def openai_check() -> Dict[str, Any]:
+        if not getattr(settings, "openai_api_key", None):
+            raise RuntimeError("OPENAI_API_KEY is not configured")
         emb = embed_texts(["ping"], settings)[0]
         return {
             "embedding_model": settings.openai_embedding_model,
@@ -38,6 +40,10 @@ def check_dependencies(settings: Settings) -> Dict[str, Any]:
         }
 
     def pinecone_check() -> Dict[str, Any]:
+        if not getattr(settings, "pinecone_api_key", None):
+            raise RuntimeError("PINECONE_API_KEY is not configured")
+        if not getattr(settings, "pinecone_index", None):
+            raise RuntimeError("PINECONE_INDEX is not configured")
         client = Pinecone(api_key=settings.pinecone_api_key)
         if settings.pinecone_host:
             index = client.Index(settings.pinecone_index, host=settings.pinecone_host)
@@ -67,4 +73,3 @@ def check_dependencies(settings: Settings) -> Dict[str, Any]:
 
     overall_ok = all(result.get("ok") for result in checks.values())
     return {"ok": overall_ok, "checks": checks}
-

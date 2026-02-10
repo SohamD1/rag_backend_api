@@ -32,7 +32,10 @@ class Settings:
     app_env: str = _get_env("APP_ENV", "development")
 
     # OpenAI
-    openai_api_key: str = _get_env("OPENAI_API_KEY", required=True)
+    # Keep optional so the app can boot and answer `/api/health` even when secrets
+    # are not yet configured in a deployment environment. Use `/api/health/deps`
+    # (and `deep=true`) to verify external dependencies.
+    openai_api_key: str | None = _get_env("OPENAI_API_KEY", default=None)
     openai_base_url: str | None = _get_env("OPENAI_BASE_URL", default=None)
     openai_timeout_seconds: float = _get_env("OPENAI_TIMEOUT_SECONDS", 90, float)
     openai_max_retries: int = _get_env("OPENAI_MAX_RETRIES", 1, int)
@@ -55,8 +58,8 @@ class Settings:
     openai_rewrite_model: str = _get_env("OPENAI_REWRITE_MODEL", "gpt-4o-mini")
 
     # Pinecone
-    pinecone_api_key: str = _get_env("PINECONE_API_KEY", required=True)
-    pinecone_index: str = _get_env("PINECONE_INDEX", required=True)
+    pinecone_api_key: str | None = _get_env("PINECONE_API_KEY", default=None)
+    pinecone_index: str | None = _get_env("PINECONE_INDEX", default=None)
     pinecone_host: str | None = _get_env("PINECONE_HOST", default=None)
     pinecone_timeout_seconds: float = _get_env("PINECONE_TIMEOUT_SECONDS", 30, float)
     pinecone_upsert_batch_size: int = _get_env("PINECONE_UPSERT_BATCH_SIZE", 100, int)

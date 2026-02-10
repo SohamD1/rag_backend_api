@@ -17,12 +17,12 @@ python -m uvicorn app.main:app --reload --port 8000
 ```
 
 ## API
-- `GET /api/health`
-- `GET /api/health/deps` and `GET /api/health/deps?deep=true`
+- `GET /api/health` (liveness; always returns `{"status":"ok"}` if the app is running)
+- `GET /api/health/deps` (readiness/config; checks whether required env vars are present)
+- `GET /api/health/deps?deep=true` (readiness/deep; actively calls OpenAI + Pinecone)
 - `POST /api/v1/documents` (multipart/form-data: `file`)
 - `GET /api/v1/documents`
 - `GET /api/v1/documents/{doc_id}/file`
 - `DELETE /api/v1/documents/{doc_id}`
 - `POST /api/v1/chat` (JSON: `{ "query": "...", "debug": false }`)
 - `POST /api/v1/chat/stream` (SSE)
-

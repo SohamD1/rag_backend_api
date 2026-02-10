@@ -13,6 +13,8 @@ _openai_client: Optional[OpenAI] = None
 def get_openai_client(settings: Settings) -> OpenAI:
     global _openai_client
     if _openai_client is None:
+        if not getattr(settings, "openai_api_key", None):
+            raise RuntimeError("OPENAI_API_KEY is not configured")
         kwargs = {}
         if settings.openai_base_url:
             kwargs["base_url"] = settings.openai_base_url
