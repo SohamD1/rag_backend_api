@@ -24,3 +24,19 @@ def estimate_tokens(text: str, model: str) -> int:
     enc = get_token_encoder(model)
     return len(enc.encode(text))
 
+
+def truncate_to_tokens(text: str, model: str, max_tokens: int) -> str:
+    """
+    Deterministically truncate to at most max_tokens for the given model.
+    Uses tiktoken for correctness; raises if tiktoken is unavailable.
+    """
+    if not text:
+        return ""
+    limit = int(max_tokens)
+    if limit <= 0:
+        return ""
+    enc = get_token_encoder(model)
+    toks = enc.encode(text)
+    if len(toks) <= limit:
+        return text
+    return enc.decode(toks[:limit])

@@ -4,7 +4,7 @@ from typing import Dict, List, Tuple, Optional
 
 from app.config import Settings
 from app.core.retrieval import RetrievalItem
-from app.core.tokens import estimate_tokens
+from app.core.tokens import estimate_tokens, truncate_to_tokens
 from app.core.vector_math import cosine_similarity
 
 
@@ -85,9 +85,20 @@ def select_context(
     selected: List[RetrievalItem] = []
     context_items: List[Dict] = []
     budget = int(settings.max_context_tokens)
+    per_item_cap = int(getattr(settings, "context_max_item_tokens", 0) or 0)
     used = 0
     for item in items:
-        cost = estimate_tokens(item.text, settings.openai_generation_model)
+        text = item.text
+        # Ensure one huge passage doesn't consume the entire budget.
+        if per_item_cap > 0:
+            try:
+                if estimate_tokens(text, settings.openai_generation_model) > per_item_cap:
+                    text = truncate_to_tokens(text, settings.openai_generation_model, per_item_cap)
+            except Exception:
+                # If tokenization fails for any reason, fall back to original text.
+                text = item.text
+
+        cost = estimate_tokens(text, settings.openai_generation_model)
         if selected and used + cost > budget:
             break
         doc_label = item.doc_id
@@ -97,6 +108,6 @@ def select_context(
         if item.section_title:
             header += f" section={item.section_title}"
         selected.append(item)
-        context_items.append({"header": header, "text": item.text})
+        context_items.append({"header": header, "text": text})
         used += cost
     return selected, context_items

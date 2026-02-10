@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import logging
 from typing import Dict, List, Optional
 
 from pinecone import Pinecone
 
 from app.config import Settings
+
+
+logger = logging.getLogger(__name__)
 
 
 class PineconeVectorStore:
@@ -22,6 +26,9 @@ class PineconeVectorStore:
     def upsert(self, items: List[Dict], namespace: str) -> None:
         if not items:
             return
+        if getattr(self.settings, "log_payloads", False):
+            # Do not log vectors; just counts and namespaces.
+            logger.info("pinecone_upsert %s", {"namespace": namespace, "count": len(items)})
         batch_size = max(1, int(self.settings.pinecone_upsert_batch_size))
         for start in range(0, len(items), batch_size):
             batch = items[start : start + batch_size]
@@ -33,6 +40,8 @@ class PineconeVectorStore:
             )
 
     def clear_namespace(self, namespace: str) -> None:
+        if getattr(self.settings, "log_payloads", False):
+            logger.info("pinecone_clear_namespace %s", {"namespace": namespace})
         self.index.delete(
             delete_all=True,
             namespace=namespace,
@@ -43,6 +52,8 @@ class PineconeVectorStore:
         ids = [i for i in (ids or []) if i]
         if not ids:
             return
+        if getattr(self.settings, "log_payloads", False):
+            logger.info("pinecone_delete_ids %s", {"namespace": namespace, "count": len(ids)})
         self.index.delete(
             ids=ids,
             namespace=namespace,
@@ -58,6 +69,16 @@ class PineconeVectorStore:
         filter: Optional[Dict] = None,
         include_values: bool = False,
     ) -> List[Dict]:
+        if getattr(self.settings, "log_payloads", False):
+            logger.info(
+                "pinecone_query %s",
+                {
+                    "namespace": namespace,
+                    "top_k": int(top_k),
+                    "filter": filter,
+                    "include_values": bool(include_values),
+                },
+            )
         response = self.index.query(
             vector=vector,
             top_k=top_k,
@@ -83,6 +104,8 @@ class PineconeVectorStore:
         ids = [i for i in (ids or []) if i]
         if not ids:
             return {}
+        if getattr(self.settings, "log_payloads", False):
+            logger.info("pinecone_fetch %s", {"namespace": namespace, "count": len(ids)})
         response = self.index.fetch(
             ids=ids,
             namespace=namespace,
@@ -95,4 +118,3 @@ class PineconeVectorStore:
             if values:
                 out[str(vec_id)] = values
         return out
-
