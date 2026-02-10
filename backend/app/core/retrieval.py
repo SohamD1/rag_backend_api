@@ -15,6 +15,9 @@ from app.services.tree_index import load_headings
 class RetrievalItem:
     source_id: str
     doc_id: str
+    filename: Optional[str]
+    file_url: Optional[str]
+    source_url: Optional[str]
     text: str
     score: float
     page_start: int
@@ -28,6 +31,9 @@ def retrieval_item_to_dict(item: RetrievalItem) -> Dict:
     return {
         "source_id": item.source_id,
         "doc_id": item.doc_id,
+        "filename": item.filename,
+        "file_url": item.file_url,
+        "source_url": item.source_url,
         "text": item.text,
         "score": item.score,
         "page_start": item.page_start,
@@ -41,6 +47,9 @@ def retrieval_item_from_dict(payload: Dict) -> RetrievalItem:
     return RetrievalItem(
         source_id=str(payload.get("source_id", "")),
         doc_id=str(payload.get("doc_id", "")),
+        filename=payload.get("filename"),
+        file_url=payload.get("file_url"),
+        source_url=payload.get("source_url"),
         text=str(payload.get("text", "")),
         score=float(payload.get("score", 0.0)),
         page_start=int(payload.get("page_start", 1)),
@@ -71,6 +80,9 @@ def retrieve_standard_for_doc(
             RetrievalItem(
                 source_id=str(meta.get("chunk_id") or match.get("id") or ""),
                 doc_id=str(meta.get("doc_id") or doc_id),
+                filename=meta.get("filename"),
+                file_url=meta.get("file_url"),
+                source_url=meta.get("source_url"),
                 text=str(meta.get("text") or ""),
                 score=float(match.get("score", 0.0)),
                 page_start=int(meta.get("page_start", 1)),
@@ -179,6 +191,9 @@ def retrieve_tree_for_doc(
                 RetrievalItem(
                     source_id=str(node_id),
                     doc_id=str(meta.get("doc_id") or doc_id),
+                    filename=meta.get("filename"),
+                    file_url=meta.get("file_url"),
+                    source_url=meta.get("source_url"),
                     text=str(meta.get("text") or ""),
                     score=float(match.get("score", 0.0)),
                     page_start=int(meta.get("page_start", 1)),
@@ -407,6 +422,9 @@ def retrieve_tree_for_doc(
             RetrievalItem(
                 source_id=str(node_id),
                 doc_id=str(meta.get("doc_id") or doc_id),
+                filename=meta.get("filename"),
+                file_url=meta.get("file_url"),
+                source_url=meta.get("source_url"),
                 text=str(meta.get("text") or ""),
                 score=float(match.get("score", 0.0)),
                 page_start=int(meta.get("page_start", 1)),

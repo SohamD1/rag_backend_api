@@ -12,6 +12,7 @@ class DocMeta:
     doc_id: str
     slug: str
     filename: str
+    source_url: str
     checksum: str
     size_bytes: int
     page_count: int
@@ -35,6 +36,7 @@ class DocRegistry:
             "doc_id": meta.doc_id,
             "slug": meta.slug,
             "filename": meta.filename,
+            "source_url": meta.source_url,
             "checksum": meta.checksum,
             "size_bytes": meta.size_bytes,
             "page_count": meta.page_count,
@@ -59,6 +61,7 @@ class DocRegistry:
         data.setdefault("size_bytes", 0)
         data.setdefault("checksum", "")
         data.setdefault("slug", data.get("doc_id", "document"))
+        data.setdefault("source_url", "")
         return DocMeta(**data)
 
     def list(self) -> List[DocMeta]:
@@ -75,6 +78,7 @@ class DocRegistry:
             data.setdefault("size_bytes", 0)
             data.setdefault("checksum", "")
             data.setdefault("slug", data.get("doc_id", "document"))
+            data.setdefault("source_url", "")
             try:
                 metas.append(DocMeta(**data))
             except Exception:
@@ -91,4 +95,3 @@ class DocRegistry:
 
 def now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
-

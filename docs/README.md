@@ -1,8 +1,7 @@
-Local PDF Drop Folder
+PDFs (Optional)
 
-Put PDFs in this folder (or set `LOCAL_INGEST_DIR` in `.env`), then call:
+This folder is a convenient place to keep PDFs during development.
 
-POST http://localhost:8000/api/v1/documents/ingest-local
+To ingest a PDF, upload it via the API (admin token required when `KB_REQUIRE_AUTH=true`):
 
-This is meant for local development. PDFs are ignored by git via `.gitignore`.
-
+- `POST /api/v1/documents` (multipart/form-data: `file`, `source_url`)

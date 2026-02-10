@@ -12,11 +12,16 @@ from app.core.pdf_text import PageText
 from app.services.tree_index import TreeNode, build_tree, save_headings, save_tree, trace_path
 
 
+def _file_url(doc_id: str) -> str:
+    return f"/api/v1/documents/{doc_id}/file"
+
+
 def build_standard_index(
     *,
     doc_id: str,
     slug: str,
     filename: str,
+    source_url: str,
     page_count: int,
     token_count: int,
     pages: List[PageText],
@@ -41,6 +46,7 @@ def build_standard_index(
         doc_id=doc_id,
         slug=slug,
         filename=filename,
+        source_url=source_url,
         route="standard",
         page_count=page_count,
         token_count=token_count,
@@ -50,6 +56,7 @@ def build_standard_index(
         vector_store=vector_store,
     )
 
+    file_url = _file_url(doc_id)
     items = []
     for chunk, emb in zip(chunks, embeddings):
         items.append(
@@ -58,6 +65,10 @@ def build_standard_index(
                 "values": emb,
                 "metadata": {
                     "doc_id": doc_id,
+                    "slug": slug,
+                    "filename": filename,
+                    "file_url": file_url,
+                    "source_url": source_url,
                     "chunk_id": chunk.chunk_id,
                     "page_start": chunk.page_start,
                     "page_end": chunk.page_end,
@@ -82,6 +93,7 @@ def build_tree_index(
     doc_id: str,
     slug: str,
     filename: str,
+    source_url: str,
     page_count: int,
     token_count: int,
     pages: List[PageText],
@@ -93,6 +105,7 @@ def build_tree_index(
     nodes = build_tree(doc_id, pages, settings)
     save_tree(doc_id, nodes, tree_dir, index_version=index_version)
     save_headings(doc_id, nodes, tree_dir, index_version=index_version)
+    file_url = _file_url(doc_id)
 
     def breadcrumb_for(node_id: str) -> str:
         path = trace_path(nodes, node_id)
@@ -124,6 +137,10 @@ def build_tree_index(
         metadatas.append(
             {
                 "doc_id": node.doc_id,
+                "slug": slug,
+                "filename": filename,
+                "file_url": file_url,
+                "source_url": source_url,
                 "node_id": node.node_id,
                 "parent_id": node.parent_id,
                 "level": node.level,
@@ -145,6 +162,7 @@ def build_tree_index(
         doc_id=doc_id,
         slug=slug,
         filename=filename,
+        source_url=source_url,
         route="tree",
         page_count=page_count,
         token_count=token_count,

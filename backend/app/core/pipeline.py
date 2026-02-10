@@ -321,6 +321,9 @@ def run_chat(
                     RetrievalItem(
                         source_id=item.source_id,
                         doc_id=item.doc_id,
+                        filename=item.filename,
+                        file_url=item.file_url,
+                        source_url=item.source_url,
                         text=item.text,
                         score=item.score,
                         page_start=item.page_start,
@@ -376,6 +379,8 @@ def run_chat(
     )
     _stage_end(on_event, "context_select", int((perf_counter() - t_context) * 1000))
 
+    source_url_by_doc_id = {m.doc_id: getattr(m, "source_url", "") for m in selected_metas}
+
     t_generate = perf_counter()
     _stage_start(on_event, "generate")
     answer, summary = generate_answer_and_summary(
@@ -390,6 +395,9 @@ def run_chat(
         citations.append(
             {
                 "doc_id": item.doc_id,
+                "filename": item.filename,
+                "file_url": item.file_url,
+                "source_url": item.source_url or source_url_by_doc_id.get(item.doc_id, ""),
                 "source_id": item.source_id,
                 "page_start": item.page_start,
                 "page_end": item.page_end,

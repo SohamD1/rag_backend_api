@@ -34,7 +34,7 @@ class Settings:
     # OpenAI
     openai_api_key: str = _get_env("OPENAI_API_KEY", required=True)
     openai_base_url: str | None = _get_env("OPENAI_BASE_URL", default=None)
-    openai_timeout_seconds: float = _get_env("OPENAI_TIMEOUT_SECONDS", 30, float)
+    openai_timeout_seconds: float = _get_env("OPENAI_TIMEOUT_SECONDS", 90, float)
     openai_max_retries: int = _get_env("OPENAI_MAX_RETRIES", 1, int)
 
     # Models
@@ -66,7 +66,6 @@ class Settings:
     docs_dir: str | None = _get_env("DOCS_DIR", default=None)
     tree_dir: str | None = _get_env("TREE_DIR", default=None)
     local_storage_dir: str | None = _get_env("LOCAL_STORAGE_DIR", default=None)
-    local_ingest_dir: str | None = _get_env("LOCAL_INGEST_DIR", default=None)
     cache_dir: str = _get_env("CACHE_DIR", "./data/cache")
 
     # Routing
@@ -90,6 +89,8 @@ class Settings:
     rerank_candidate_k: int = _get_env("RERANK_CANDIDATE_K", 50, int)
     rerank_top_k: int = _get_env("RERANK_TOP_K", 10, int)
     max_context_tokens: int = _get_env("MAX_CONTEXT_TOKENS", 4500, int)
+    # Cap any single context item to avoid one long chunk starving the entire context budget.
+    context_max_item_tokens: int = _get_env("CONTEXT_MAX_ITEM_TOKENS", 1200, int)
     low_confidence_threshold: float = _get_env("LOW_CONFIDENCE_THRESHOLD", 0.35, float)
     context_use_mmr: bool = _get_env("CONTEXT_USE_MMR", "true", cast=_bool_env)
     context_mmr_lambda: float = _get_env("CONTEXT_MMR_LAMBDA", 0.7, float)
@@ -120,6 +121,11 @@ class Settings:
 
     # Debugging / SSE
     rag_debug: bool = _get_env("RAG_DEBUG", "false", cast=_bool_env)
+    log_payloads: bool = _get_env("RAG_LOG_PAYLOADS", "false", cast=_bool_env)
+    # Log only the final chat answer/citations (no prompts, no vectors).
+    log_chat_answer: bool = _get_env("RAG_LOG_CHAT_ANSWER", "false", cast=_bool_env)
+    # Max characters per logged string field (prompts/responses). Set <=0 to disable truncation.
+    log_payload_max_chars: int = _get_env("RAG_LOG_PAYLOAD_MAX_CHARS", 8000, int)
     sse_heartbeat_seconds: float = _get_env("SSE_HEARTBEAT_SECONDS", 15.0, float)
 
     # Versioning
@@ -156,12 +162,6 @@ def resolve_storage_dir(s: Settings) -> Path:
     if s.local_storage_dir:
         return resolve_path(s.local_storage_dir)
     return resolve_data_dir(s) / "uploads"
-
-def resolve_ingest_dir(s: Settings) -> Path:
-    # Default is a repo-root folder to make local bulk ingest simple.
-    if s.local_ingest_dir:
-        return resolve_path(s.local_ingest_dir)
-    return ROOT_DIR / "docs"
 
 
 def resolve_cache_dir(s: Settings) -> Path:

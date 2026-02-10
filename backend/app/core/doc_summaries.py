@@ -43,6 +43,7 @@ def upsert_doc_centroid(
     doc_id: str,
     slug: str,
     filename: str,
+    source_url: str,
     route: str,
     page_count: int,
     token_count: int,
@@ -57,6 +58,8 @@ def upsert_doc_centroid(
         "doc_id": doc_id,
         "slug": slug,
         "filename": filename,
+        "file_url": f"/api/v1/documents/{doc_id}/file",
+        "source_url": source_url,
         "route": route,
         "page_count": page_count,
         "token_count": token_count,
@@ -114,4 +117,3 @@ def select_doc_ids_from_matches(
 
     selected = [item["doc_id"] for item in ranked[: max(1, top_k_fallback)]]
     return selected, False, {**debug, "strong": False}
-

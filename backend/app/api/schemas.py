@@ -7,6 +7,7 @@ class DocumentCreateResponse(BaseModel):
     doc_id: str
     slug: str
     filename: str
+    source_url: str
     page_count: int
     token_count: int
     route: str
@@ -18,6 +19,7 @@ class DocumentInfo(BaseModel):
     doc_id: str
     slug: str
     filename: str
+    source_url: str
     page_count: int
     token_count: int
     route: str
@@ -36,6 +38,9 @@ class ChatRequest(BaseModel):
 
 class Citation(BaseModel):
     doc_id: str
+    filename: Optional[str] = None
+    file_url: Optional[str] = None
+    source_url: str
     source_id: str
     page_start: int
     page_end: int
@@ -50,4 +55,3 @@ class ChatResponse(BaseModel):
     route: str
     used_context_count: int
     debug: Optional[Dict[str, Any]] = None
-

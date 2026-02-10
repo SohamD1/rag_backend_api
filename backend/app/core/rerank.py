@@ -32,6 +32,9 @@ def rerank_items(
             RetrievalItem(
                 source_id=item.source_id,
                 doc_id=item.doc_id,
+                filename=item.filename,
+                file_url=item.file_url,
+                source_url=item.source_url,
                 text=item.text,
                 score=float(score),
                 page_start=item.page_start,
