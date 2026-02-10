@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.adapters.openai_client import get_openai_client
+from app.adapters.openai_client import chat_completions_create
 from app.config import Settings
 from app.core.json_utils import extract_json_object
 
@@ -74,8 +74,8 @@ def select_tree_nodes_with_llm(
     )
 
     try:
-        client = get_openai_client(settings)
-        response = client.chat.completions.create(
+        response = chat_completions_create(
+            settings,
             model=getattr(settings, "openai_tree_search_model", settings.openai_generation_model),
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -102,4 +102,3 @@ def select_tree_nodes_with_llm(
         return out, thinking
     except Exception:
         return [], None
-

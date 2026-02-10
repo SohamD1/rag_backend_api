@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from app.adapters.openai_client import get_openai_client
+from app.adapters.openai_client import chat_completions_create, get_openai_client
 from app.config import Settings
 from app.core.json_utils import extract_json_payload
 from app.core.pdf_text import PageText
@@ -41,8 +41,8 @@ class TreeNode:
 
 
 def _llm_chat(settings: Settings, prompt: str, *, max_tokens: int = 4096) -> str:
-    client = get_openai_client(settings)
-    response = client.chat.completions.create(
+    response = chat_completions_create(
+        settings,
         model=settings.openai_tree_model,
         messages=[{"role": "user", "content": prompt}],
         temperature=0.0,
@@ -59,8 +59,8 @@ def _llm_json(
     user_prompt: str,
     max_tokens: int = 4096,
 ) -> Any:
-    client = get_openai_client(settings)
-    response = client.chat.completions.create(
+    response = chat_completions_create(
+        settings,
         model=model,
         messages=[
             {"role": "system", "content": system_prompt},
@@ -799,8 +799,8 @@ def _summarize_heading_nodes(
         )
         user_prompt = f"Section title:\n{n.title}\n\nSection text:\n{text}\n\nSummary:"
         try:
-            client = get_openai_client(settings)
-            response = client.chat.completions.create(
+            response = chat_completions_create(
+                settings,
                 model=settings.openai_tree_model,
                 messages=[
                     {"role": "system", "content": system_prompt},

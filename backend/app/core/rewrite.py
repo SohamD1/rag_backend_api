@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from app.adapters.openai_client import get_openai_client
+from app.adapters.openai_client import chat_completions_create
 from app.config import Settings
 from app.core.json_utils import extract_json_object
 
@@ -27,8 +27,8 @@ def rewrite_query_for_doc_selection(query: str, settings: Settings) -> str:
     user_prompt = f"Question:\n{text}\n\nJSON:"
 
     try:
-        client = get_openai_client(settings)
-        response = client.chat.completions.create(
+        response = chat_completions_create(
+            settings,
             model=settings.openai_rewrite_model or settings.openai_generation_model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -42,4 +42,3 @@ def rewrite_query_for_doc_selection(query: str, settings: Settings) -> str:
         return rewritten or query
     except Exception:
         return query
-
