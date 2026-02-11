@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 
 from app.adapters.pinecone_store import PineconeVectorStore
+from app.api.deps import get_vector_store
 from app.api.schemas import DocumentCreateResponse, DocumentInfo, DocumentListResponse
 from app.api.security import KBAdminAuthDep
 from app.api.rate_limit import admin_rate_limit, make_rate_limit_dep
@@ -31,7 +32,6 @@ DOCS_DIR = resolve_docs_dir(settings)
 TREE_DIR = resolve_tree_dir(settings)
 STORAGE_DIR = resolve_storage_dir(settings)
 
-vector_store = PineconeVectorStore(settings)
 registry = DocRegistry(DOCS_DIR)
 
 
@@ -173,6 +173,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
             )
 
     try:
+        vector_store = get_vector_store()
         if route == "tree":
             indexed_count = build_tree_index(
                 doc_id=stored.doc_id,
@@ -300,14 +301,22 @@ def delete_document(doc_id: str):
         raise HTTPException(status_code=404, detail="Document not found.")
 
     # Delete vectors for the doc namespace.
+    vector_store: PineconeVectorStore | None = None
     try:
-        vector_store.clear_namespace(doc_id)
+        vector_store = get_vector_store()
+    except HTTPException:
+        vector_store = None
+
+    try:
+        if vector_store is not None:
+            vector_store.clear_namespace(doc_id)
     except Exception:
         pass
 
     # Delete doc centroid in summary namespace.
     try:
-        vector_store.delete_ids([doc_id], namespace=settings.doc_summary_namespace)
+        if vector_store is not None:
+            vector_store.delete_ids([doc_id], namespace=settings.doc_summary_namespace)
     except Exception:
         pass
 

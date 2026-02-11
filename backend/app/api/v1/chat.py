@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import StreamingResponse
 from fastapi import Depends
 
-from app.adapters.pinecone_store import PineconeVectorStore
+from app.api.deps import get_vector_store
 from app.api.schemas import ChatRequest, ChatResponse
 from app.api.security import KBAppAuthDep
 from app.api.rate_limit import chat_rate_limit, make_rate_limit_dep
@@ -21,7 +21,6 @@ DOCS_DIR = resolve_docs_dir(settings)
 TREE_DIR = resolve_tree_dir(settings)
 CACHE_DIR = resolve_cache_dir(settings)
 
-vector_store = PineconeVectorStore(settings)
 registry = DocRegistry(DOCS_DIR)
 retrieval_cache = JsonCache(CACHE_DIR / "retrieval")
 response_cache = JsonCache(CACHE_DIR / "response")
@@ -36,7 +35,7 @@ def chat(req: ChatRequest):
         debug_enabled=bool(req.debug or settings.rag_debug),
         settings=settings,
         registry=registry,
-        vector_store=vector_store,
+        vector_store=get_vector_store(),
         retrieval_cache=retrieval_cache,
         response_cache=response_cache,
         tree_dir=TREE_DIR,
@@ -68,7 +67,7 @@ def chat_stream(req: ChatRequest):
         debug_enabled=bool(req.debug or settings.rag_debug),
         settings=settings,
         registry=registry,
-        vector_store=vector_store,
+        vector_store=get_vector_store(),
         retrieval_cache=retrieval_cache,
         response_cache=response_cache,
         tree_dir=TREE_DIR,
