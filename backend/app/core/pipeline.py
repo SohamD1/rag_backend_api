@@ -69,6 +69,47 @@ def _sort_metas_for_fallback(metas: List[DocMeta]) -> List[DocMeta]:
     return sorted(metas, key=key, reverse=True)
 
 
+def _consolidate_citations(
+    *,
+    items: List[RetrievalItem],
+    source_url_by_doc_id: Dict[str, str],
+) -> List[Dict[str, Any]]:
+    by_doc: Dict[str, Dict[str, Any]] = {}
+    doc_order: List[str] = []
+
+    for item in items:
+        doc_id = str(item.doc_id or "").strip()
+        if not doc_id:
+            continue
+        if doc_id not in by_doc:
+            by_doc[doc_id] = {
+                "doc_id": doc_id,
+                "filename": item.filename,
+                "file_url": item.file_url,
+                "source_url": item.source_url or source_url_by_doc_id.get(doc_id, ""),
+                "source_id": f"{doc_id}:consolidated",
+                "page_start": int(item.page_start),
+                "page_end": int(item.page_end),
+                "section_title": item.section_title,
+            }
+            doc_order.append(doc_id)
+            continue
+
+        cur = by_doc[doc_id]
+        cur["page_start"] = min(int(cur["page_start"]), int(item.page_start))
+        cur["page_end"] = max(int(cur["page_end"]), int(item.page_end))
+        if not cur.get("filename") and item.filename:
+            cur["filename"] = item.filename
+        if not cur.get("file_url") and item.file_url:
+            cur["file_url"] = item.file_url
+        if not cur.get("source_url"):
+            cur["source_url"] = item.source_url or source_url_by_doc_id.get(doc_id, "")
+        if not cur.get("section_title") and item.section_title:
+            cur["section_title"] = item.section_title
+
+    return [by_doc[doc_id] for doc_id in doc_order]
+
+
 def select_docs_with_rewrite_retry(
     *,
     query: str,
@@ -170,6 +211,7 @@ def run_chat(
             "rerank_candidate_k": settings.rerank_candidate_k,
             "rewrite_model": settings.openai_rewrite_model,
             "rewrite_attempts": settings.doc_rewrite_max_attempts,
+            "citation_mode": "doc_consolidated_v1",
             "debug": debug_enabled,
         }
     )
@@ -390,20 +432,10 @@ def run_chat(
     )
     _stage_end(on_event, "generate", int((perf_counter() - t_generate) * 1000))
 
-    citations = []
-    for item in selected:
-        citations.append(
-            {
-                "doc_id": item.doc_id,
-                "filename": item.filename,
-                "file_url": item.file_url,
-                "source_url": item.source_url or source_url_by_doc_id.get(item.doc_id, ""),
-                "source_id": item.source_id,
-                "page_start": item.page_start,
-                "page_end": item.page_end,
-                "section_title": item.section_title,
-            }
-        )
+    citations = _consolidate_citations(
+        items=selected,
+        source_url_by_doc_id=source_url_by_doc_id,
+    )
 
     payload = {
         "answer": answer,

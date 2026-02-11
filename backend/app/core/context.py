@@ -108,6 +108,15 @@ def select_context(
         if item.section_title:
             header += f" section={item.section_title}"
         selected.append(item)
-        context_items.append({"header": header, "text": text})
+        context_items.append(
+            {
+                "header": header,
+                "text": text,
+                "doc_id": item.doc_id,
+                "filename": item.filename,
+                "page_start": item.page_start,
+                "page_end": item.page_end,
+            }
+        )
         used += cost
     return selected, context_items

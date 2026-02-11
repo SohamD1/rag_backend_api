@@ -29,9 +29,16 @@ def generate_answer_and_summary(
 ) -> Tuple[str, str]:
     model = settings.openai_generation_model
 
-    context_text = "\n\n".join(
-        f"[{i+1}] {item['header']}\n{item['text']}" for i, item in enumerate(context_items)
-    )
+    source_numbers: Dict[str, int] = {}
+    numbered_context: List[str] = []
+    for i, item in enumerate(context_items):
+        source_key = str(item.get("doc_id") or item.get("header") or f"ctx_{i + 1}")
+        if source_key not in source_numbers:
+            source_numbers[source_key] = len(source_numbers) + 1
+        source_num = source_numbers[source_key]
+        numbered_context.append(f"[{source_num}] {item['header']}\n{item['text']}")
+
+    context_text = "\n\n".join(numbered_context)
     system_prompt = (
         "You are a grounded RAG assistant.\n"
         "Answer using ONLY the provided context.\n"
@@ -40,7 +47,9 @@ def generate_answer_and_summary(
         "Output requirements:\n"
         "- The answer should be detailed and directly useful. Prefer 6-12 bullet points or short sections.\n"
         "- Make the answer explicit (definitions, steps, constraints, exceptions) rather than a high-level summary.\n"
-        "- Cite sources with bracketed numbers like [1], [2]. Every factual claim should have a citation.\n"
+        "- Cite sources with bracketed numbers like [1], [2].\n"
+        "- Source numbers are document-level; re-use the same number for passages from the same document.\n"
+        "- Every factual claim should have a citation.\n"
         "- Do NOT include citations in the summary.\n\n"
         "Return STRICT JSON with keys:\n"
         "- answer: string (detailed; may include citations like [1])\n"
