@@ -69,6 +69,29 @@ def _sort_metas_for_fallback(metas: List[DocMeta]) -> List[DocMeta]:
     return sorted(metas, key=key, reverse=True)
 
 
+def _should_skip_rerank(
+    *,
+    ordered_items: List[RetrievalItem],
+    strong_doc_match: bool,
+    low_confidence_threshold: float,
+) -> bool:
+    """
+    Production-safe fast path:
+    if retrieval is already very confident, skip vector fetch + rerank.
+    """
+    if not strong_doc_match or not ordered_items:
+        return False
+    top1 = float(ordered_items[0].score)
+    top2 = float(ordered_items[1].score) if len(ordered_items) > 1 else 0.0
+    min_top = max(float(low_confidence_threshold) + 0.15, 0.55)
+    min_ratio = 1.08
+    if top1 < min_top:
+        return False
+    if top2 > 0 and top1 < (top2 * min_ratio):
+        return False
+    return True
+
+
 def _consolidate_citations(
     *,
     items: List[RetrievalItem],
@@ -118,6 +141,7 @@ def select_docs_with_rewrite_retry(
     settings: Settings,
     vector_store: PineconeVectorStore,
     debug: Optional[Dict[str, Any]] = None,
+    allow_rewrite: bool = True,
 ) -> Tuple[List[str], bool, str, List[float]]:
     # Pass 1: doc summaries with original query
     matches = query_doc_summaries(
@@ -138,7 +162,7 @@ def select_docs_with_rewrite_retry(
     # Rewrite-and-retry (no query-shape heuristics)
     rewritten_query = query
     rewritten_embedding = query_embedding
-    for attempt in range(max(0, int(settings.doc_rewrite_max_attempts))):
+    for attempt in range(max(0, int(settings.doc_rewrite_max_attempts)) if allow_rewrite else 0):
         rewritten_query = rewrite_query_for_doc_selection(query, settings)
         rewritten_embedding = embed_texts([rewritten_query], settings)[0]
         matches2 = query_doc_summaries(
@@ -239,6 +263,7 @@ def run_chat(
         settings=settings,
         vector_store=vector_store,
         debug=debug_info,
+        allow_rewrite=False,
     )
     _stage_end(on_event, "doc_selection", int((perf_counter() - t_select) * 1000))
 
@@ -247,154 +272,252 @@ def run_chat(
     if not selected_metas:
         raise HTTPException(status_code=404, detail="Selected documents not found in registry.")
 
-    # Retrieval cache is keyed by rewritten query + selected doc versions.
-    selected_versions = sorted(f"{m.doc_id}:{m.index_version}:{m.route}" for m in selected_metas)
-    retrieval_key = make_cache_key(
-        {
-            "kind": "retrieval",
-            "query": normalize_query(retrieval_query),
-            "orig_query": normalized,
-            "selected_doc_versions": selected_versions,
-            "retrieve_top_k": settings.retrieve_top_k,
-            "tree_section_top_k": settings.tree_section_top_k,
-            "tree_node_selection_mode": getattr(settings, "tree_node_selection_mode", "vector_only"),
-            "tree_node_selection_candidate_k": getattr(settings, "tree_node_selection_candidate_k", 24),
-            "tree_node_selection_top_n": getattr(settings, "tree_node_selection_top_n", 6),
-            "tree_node_selection_model": getattr(settings, "openai_tree_search_model", None),
-        }
-    )
+    def _retrieve_and_rerank(
+        *,
+        selected_metas_local: List[DocMeta],
+        retrieval_query_local: str,
+        retrieval_embedding_local: List[float],
+        strong_doc_match: bool,
+        stage_prefix: str = "",
+    ) -> List[RetrievalItem]:
+        stage_retrieve = f"{stage_prefix}retrieve"
+        stage_rerank_fetch = f"{stage_prefix}rerank_fetch"
+        stage_rerank = f"{stage_prefix}rerank"
+        stage_retrieve_cache = f"{stage_prefix}retrieve_cache"
+        debug_retrieval_key = "retrieval" if not stage_prefix else f"{stage_prefix}retrieval".rstrip("_")
 
-    results: List[RetrievalItem] = []
-    cached_r = retrieval_cache.get(retrieval_key)
-    if cached_r:
-        _emit(on_event, "info", {"stage": "retrieval_cache", "cache_hit": True})
-        results = [
-            retrieval_item_from_dict(item)
-            for item in (cached_r.value or {}).get("items", [])
-        ]
-        if debug_info is not None:
-            debug_info["stage_order"].append("retrieve_cache")
-            debug_info["retrieval"] = {"cache_hit": True, "count": len(results)}
-    else:
-        t_retrieve = perf_counter()
-        _stage_start(on_event, "retrieve")
-        retrieval_debug_by_doc: Dict[str, Dict[str, Any]] = {}
-
-        def _retrieve_one(meta: DocMeta):
-            local_debug: Dict[str, Any] = {}
-            if meta.route == "tree":
-                items = retrieve_tree_for_doc(
-                    doc_id=meta.doc_id,
-                    query=query,
-                    query_embedding=retrieval_embedding,
-                    settings=settings,
-                    vector_store=vector_store,
-                    top_k=settings.retrieve_top_k,
-                    debug=local_debug if debug_info else None,
-                    tree_dir=tree_dir,
-                    index_version=meta.index_version,
-                )
-            else:
-                items = retrieve_standard_for_doc(
-                    doc_id=meta.doc_id,
-                    query_embedding=retrieval_embedding,
-                    settings=settings,
-                    vector_store=vector_store,
-                    top_k=settings.retrieve_top_k,
-                )
-            return meta.doc_id, items, local_debug
-
-        with ThreadPoolExecutor(max_workers=min(6, max(1, len(selected_metas)))) as executor:
-            futures = [executor.submit(_retrieve_one, m) for m in selected_metas]
-            for future in as_completed(futures):
-                try:
-                    doc_id, items, local_debug = future.result()
-                except Exception:
-                    continue
-                results.extend(items or [])
-                if debug_info is not None and local_debug:
-                    retrieval_debug_by_doc[doc_id] = local_debug
-        _stage_end(on_event, "retrieve", int((perf_counter() - t_retrieve) * 1000))
-        retrieval_cache.set(
-            retrieval_key,
-            {"items": [retrieval_item_to_dict(item) for item in results]},
+        selected_versions = sorted(
+            f"{m.doc_id}:{m.index_version}:{m.route}" for m in selected_metas_local
         )
-        if debug_info is not None:
-            debug_info["stage_order"].append("retrieve")
-            debug_info.setdefault("retrieval", {})["count"] = len(results)
-            if retrieval_debug_by_doc:
-                debug_info["retrieval_by_doc"] = retrieval_debug_by_doc
+        retrieval_key = make_cache_key(
+            {
+                "kind": "retrieval",
+                "query": normalize_query(retrieval_query_local),
+                "orig_query": normalized,
+                "selected_doc_versions": selected_versions,
+                "retrieve_top_k": settings.retrieve_top_k,
+                "tree_section_top_k": settings.tree_section_top_k,
+                "tree_node_selection_mode": getattr(settings, "tree_node_selection_mode", "vector_only"),
+                "tree_node_selection_candidate_k": getattr(settings, "tree_node_selection_candidate_k", 24),
+                "tree_node_selection_top_n": getattr(settings, "tree_node_selection_top_n", 6),
+                "tree_node_selection_model": getattr(settings, "openai_tree_search_model", None),
+            }
+        )
 
-    if not results:
+        results_local: List[RetrievalItem] = []
+        cached_r = retrieval_cache.get(retrieval_key)
+        if cached_r:
+            _emit(on_event, "info", {"stage": stage_retrieve_cache, "cache_hit": True})
+            results_local = [
+                retrieval_item_from_dict(item)
+                for item in (cached_r.value or {}).get("items", [])
+            ]
+            if debug_info is not None:
+                debug_info["stage_order"].append(stage_retrieve_cache)
+                debug_info[debug_retrieval_key] = {"cache_hit": True, "count": len(results_local)}
+        else:
+            t_retrieve = perf_counter()
+            _stage_start(on_event, stage_retrieve)
+            retrieval_debug_by_doc: Dict[str, Dict[str, Any]] = {}
+
+            def _retrieve_one(meta: DocMeta):
+                local_debug: Dict[str, Any] = {}
+                if meta.route == "tree":
+                    items = retrieve_tree_for_doc(
+                        doc_id=meta.doc_id,
+                        query=retrieval_query_local,
+                        query_embedding=retrieval_embedding_local,
+                        settings=settings,
+                        vector_store=vector_store,
+                        top_k=settings.retrieve_top_k,
+                        debug=local_debug if debug_info else None,
+                        tree_dir=tree_dir,
+                        index_version=meta.index_version,
+                    )
+                else:
+                    items = retrieve_standard_for_doc(
+                        doc_id=meta.doc_id,
+                        query_embedding=retrieval_embedding_local,
+                        settings=settings,
+                        vector_store=vector_store,
+                        top_k=settings.retrieve_top_k,
+                    )
+                return meta.doc_id, items, local_debug
+
+            with ThreadPoolExecutor(max_workers=min(6, max(1, len(selected_metas_local)))) as executor:
+                futures = [executor.submit(_retrieve_one, m) for m in selected_metas_local]
+                for future in as_completed(futures):
+                    try:
+                        doc_id, items, local_debug = future.result()
+                    except Exception:
+                        continue
+                    results_local.extend(items or [])
+                    if debug_info is not None and local_debug:
+                        retrieval_debug_by_doc[doc_id] = local_debug
+            _stage_end(on_event, stage_retrieve, int((perf_counter() - t_retrieve) * 1000))
+            retrieval_cache.set(
+                retrieval_key,
+                {"items": [retrieval_item_to_dict(item) for item in results_local]},
+            )
+            if debug_info is not None:
+                debug_info["stage_order"].append(stage_retrieve)
+                debug_info.setdefault(debug_retrieval_key, {})["count"] = len(results_local)
+                if retrieval_debug_by_doc:
+                    key = "retrieval_by_doc" if not stage_prefix else f"{stage_prefix}retrieval_by_doc".rstrip("_")
+                    debug_info[key] = retrieval_debug_by_doc
+
+        if not results_local:
+            return []
+
+        ordered_for_fetch = sorted(results_local, key=lambda x: x.score, reverse=True)
+        if _should_skip_rerank(
+            ordered_items=ordered_for_fetch,
+            strong_doc_match=strong_doc_match,
+            low_confidence_threshold=settings.low_confidence_threshold,
+        ):
+            _emit(
+                on_event,
+                "info",
+                {
+                    "stage": stage_rerank,
+                    "skipped": True,
+                    "reason": "high_confidence_retrieval",
+                },
+            )
+            reranked_local = ordered_for_fetch[: max(1, int(settings.rerank_top_k))]
+            if debug_info is not None:
+                debug_info["stage_order"].append(f"{stage_rerank}_skip")
+                debug_info["top_score"] = reranked_local[0].score if reranked_local else -1.0
+                debug_info["low_confidence_threshold"] = settings.low_confidence_threshold
+            return reranked_local
+
+        # Attach stored vector values for rerank candidates (bounded, grouped by namespace/doc_id).
+        t_fetch = perf_counter()
+        _stage_start(on_event, stage_rerank_fetch)
+        candidates = ordered_for_fetch[: max(0, int(settings.rerank_candidate_k))]
+        ids_by_doc: Dict[str, List[str]] = {}
+        for item in candidates:
+            if item.doc_id and item.source_id:
+                ids_by_doc.setdefault(item.doc_id, []).append(item.source_id)
+        embedding_by_key: Dict[tuple[str, str], List[float]] = {}
+        if ids_by_doc:
+            with ThreadPoolExecutor(max_workers=min(6, len(ids_by_doc))) as executor:
+                futures = {
+                    executor.submit(vector_store.fetch, ids=ids, namespace=doc_id): doc_id
+                    for doc_id, ids in ids_by_doc.items()
+                }
+                for future in as_completed(futures):
+                    doc_id = futures[future]
+                    try:
+                        id_to_values = future.result() or {}
+                    except Exception:
+                        continue
+                    for source_id, emb in id_to_values.items():
+                        if emb:
+                            embedding_by_key[(doc_id, source_id)] = emb
+
+        if embedding_by_key:
+            next_results: List[RetrievalItem] = []
+            for item in results_local:
+                emb = embedding_by_key.get((item.doc_id, item.source_id))
+                if emb is not None:
+                    next_results.append(
+                        RetrievalItem(
+                            source_id=item.source_id,
+                            doc_id=item.doc_id,
+                            filename=item.filename,
+                            file_url=item.file_url,
+                            source_url=item.source_url,
+                            text=item.text,
+                            score=item.score,
+                            page_start=item.page_start,
+                            page_end=item.page_end,
+                            section_title=item.section_title,
+                            route=item.route,
+                            embedding=emb,
+                        )
+                    )
+                else:
+                    next_results.append(item)
+            results_local = next_results
+        _stage_end(on_event, stage_rerank_fetch, int((perf_counter() - t_fetch) * 1000))
+
+        # Rerank deterministically with cosine(query, stored_vector).
+        t_rerank = perf_counter()
+        _stage_start(on_event, stage_rerank)
+        reranked_local = rerank_items(
+            query_embedding=retrieval_embedding_local,
+            items=results_local,
+            top_k=settings.rerank_top_k,
+            candidate_k=settings.rerank_candidate_k,
+        )
+        _stage_end(on_event, stage_rerank, int((perf_counter() - t_rerank) * 1000))
+
+        if debug_info is not None:
+            debug_info["stage_order"].append(stage_rerank)
+            debug_info["top_score"] = reranked_local[0].score if reranked_local else -1.0
+            debug_info["low_confidence_threshold"] = settings.low_confidence_threshold
+        return reranked_local
+
+    reranked = _retrieve_and_rerank(
+        selected_metas_local=selected_metas,
+        retrieval_query_local=retrieval_query,
+        retrieval_embedding_local=retrieval_embedding,
+        strong_doc_match=strong,
+        stage_prefix="",
+    )
+    if not reranked:
         raise HTTPException(status_code=404, detail="No relevant context found.")
 
-    # Attach stored vector values for rerank candidates (bounded, grouped by namespace/doc_id).
-    t_fetch = perf_counter()
-    _stage_start(on_event, "rerank_fetch")
-    ordered_for_fetch = sorted(results, key=lambda x: x.score, reverse=True)
-    candidates = ordered_for_fetch[: max(0, int(settings.rerank_candidate_k))]
-    ids_by_doc: Dict[str, List[str]] = {}
-    for item in candidates:
-        if item.doc_id and item.source_id:
-            ids_by_doc.setdefault(item.doc_id, []).append(item.source_id)
-    embedding_by_key: Dict[tuple[str, str], List[float]] = {}
-    if ids_by_doc:
-        with ThreadPoolExecutor(max_workers=min(6, len(ids_by_doc))) as executor:
-            futures = {
-                executor.submit(vector_store.fetch, ids=ids, namespace=doc_id): doc_id
-                for doc_id, ids in ids_by_doc.items()
+    # Strict rewrite policy: only retry once we see low confidence after retrieval/rerank.
+    if reranked[0].score < settings.low_confidence_threshold and int(settings.doc_rewrite_max_attempts) > 0:
+        t_rewrite = perf_counter()
+        _stage_start(on_event, "rewrite_query")
+        rewritten_query = rewrite_query_for_doc_selection(query, settings)
+        rewritten_embedding = embed_texts([rewritten_query], settings)[0]
+        _stage_end(on_event, "rewrite_query", int((perf_counter() - t_rewrite) * 1000))
+
+        t_select_retry = perf_counter()
+        _stage_start(on_event, "doc_selection_rewrite")
+        retry_doc_ids, retry_strong, retry_retrieval_query, retry_retrieval_embedding = (
+            select_docs_with_rewrite_retry(
+                query=rewritten_query,
+                query_embedding=rewritten_embedding,
+                metas=metas,
+                settings=settings,
+                vector_store=vector_store,
+                debug=None,
+                allow_rewrite=False,
+            )
+        )
+        _stage_end(on_event, "doc_selection_rewrite", int((perf_counter() - t_select_retry) * 1000))
+
+        retry_selected_metas = [meta_by_id[d] for d in retry_doc_ids if d in meta_by_id]
+        retry_reranked: List[RetrievalItem] = []
+        if retry_selected_metas:
+            retry_reranked = _retrieve_and_rerank(
+                selected_metas_local=retry_selected_metas,
+                retrieval_query_local=retry_retrieval_query,
+                retrieval_embedding_local=retry_retrieval_embedding,
+                strong_doc_match=retry_strong,
+                stage_prefix="rewrite_",
+            )
+
+        base_top = reranked[0].score if reranked else -1.0
+        retry_top = retry_reranked[0].score if retry_reranked else -1.0
+        used_rewrite_retry = bool(retry_reranked and retry_top > base_top)
+        if used_rewrite_retry:
+            selected_metas = retry_selected_metas
+            reranked = retry_reranked
+            strong = retry_strong
+        if debug_info is not None:
+            debug_info["rewrite_retry"] = {
+                "query_used": rewritten_query,
+                "retry_selected_doc_ids": retry_doc_ids,
+                "base_top_score": base_top,
+                "retry_top_score": retry_top,
+                "applied": used_rewrite_retry,
             }
-            for future in as_completed(futures):
-                doc_id = futures[future]
-                try:
-                    id_to_values = future.result() or {}
-                except Exception:
-                    continue
-                for source_id, emb in id_to_values.items():
-                    if emb:
-                        embedding_by_key[(doc_id, source_id)] = emb
-
-    if embedding_by_key:
-        next_results: List[RetrievalItem] = []
-        for item in results:
-            emb = embedding_by_key.get((item.doc_id, item.source_id))
-            if emb is not None:
-                next_results.append(
-                    RetrievalItem(
-                        source_id=item.source_id,
-                        doc_id=item.doc_id,
-                        filename=item.filename,
-                        file_url=item.file_url,
-                        source_url=item.source_url,
-                        text=item.text,
-                        score=item.score,
-                        page_start=item.page_start,
-                        page_end=item.page_end,
-                        section_title=item.section_title,
-                        route=item.route,
-                        embedding=emb,
-                    )
-                )
-            else:
-                next_results.append(item)
-        results = next_results
-    _stage_end(on_event, "rerank_fetch", int((perf_counter() - t_fetch) * 1000))
-
-    # Rerank deterministically with cosine(query, stored_vector).
-    t_rerank = perf_counter()
-    _stage_start(on_event, "rerank")
-    reranked = rerank_items(
-        query_embedding=retrieval_embedding,
-        items=results,
-        top_k=settings.rerank_top_k,
-        candidate_k=settings.rerank_candidate_k,
-    )
-    _stage_end(on_event, "rerank", int((perf_counter() - t_rerank) * 1000))
-
-    if debug_info is not None:
-        debug_info["stage_order"].append("rerank")
-        debug_info["top_score"] = reranked[0].score if reranked else -1.0
-        debug_info["low_confidence_threshold"] = settings.low_confidence_threshold
 
     if not reranked or reranked[0].score < settings.low_confidence_threshold:
         payload = {
