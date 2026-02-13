@@ -97,6 +97,10 @@ class Settings:
     low_confidence_threshold: float = _get_env("LOW_CONFIDENCE_THRESHOLD", 0.35, float)
     context_use_mmr: bool = _get_env("CONTEXT_USE_MMR", "true", cast=_bool_env)
     context_mmr_lambda: float = _get_env("CONTEXT_MMR_LAMBDA", 0.7, float)
+    # Feature flag: when false, skip final answer generation and return chunks only.
+    rag_generate_answers_enabled: bool = _get_env(
+        "RAG_GENERATE_ANSWERS_ENABLED", "true", cast=_bool_env
+    )
 
     # Tree indexing + retrieval (PageIndex-style caps)
     toc_check_page_num: int = _get_env("TOC_CHECK_PAGE_NUM", 20, int)

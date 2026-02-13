@@ -8,6 +8,8 @@
    - `OPENAI_API_KEY`
    - `PINECONE_API_KEY`
    - `PINECONE_INDEX` (and `PINECONE_HOST` if needed)
+4. Optional: set `RAG_GENERATE_ANSWERS_ENABLED=false` to run retrieval-only mode
+   (`/api/v1/chat` returns selected chunks without LLM-generated answer text).
 
 ## Run
 From `backend/`:
@@ -26,3 +28,6 @@ python -m uvicorn app.main:app --reload --port 8000
 - `DELETE /api/v1/documents/{doc_id}`
 - `POST /api/v1/chat` (JSON: `{ "query": "...", "debug": false }`)
 - `POST /api/v1/chat/stream` (SSE)
+
+When retrieval-only mode is enabled (`RAG_GENERATE_ANSWERS_ENABLED=false`), chat responses
+include a `chunks` array with selected chunk text/metadata and skip final answer generation.

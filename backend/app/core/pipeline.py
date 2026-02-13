@@ -133,6 +133,27 @@ def _consolidate_citations(
     return [by_doc[doc_id] for doc_id in doc_order]
 
 
+def _build_chunk_payload(items: List[RetrievalItem]) -> List[Dict[str, Any]]:
+    chunks: List[Dict[str, Any]] = []
+    for item in items:
+        chunks.append(
+            {
+                "source_id": item.source_id,
+                "doc_id": item.doc_id,
+                "filename": item.filename,
+                "file_url": item.file_url,
+                "source_url": item.source_url,
+                "text": item.text,
+                "score": float(item.score),
+                "page_start": int(item.page_start),
+                "page_end": int(item.page_end),
+                "section_title": item.section_title,
+                "route": item.route,
+            }
+        )
+    return chunks
+
+
 def select_docs_with_rewrite_retry(
     *,
     query: str,
@@ -236,6 +257,7 @@ def run_chat(
             "rewrite_model": settings.openai_rewrite_model,
             "rewrite_attempts": settings.doc_rewrite_max_attempts,
             "citation_mode": "doc_consolidated_v1",
+            "generate_answers_enabled": settings.rag_generate_answers_enabled,
             "debug": debug_enabled,
         }
     )
@@ -519,7 +541,11 @@ def run_chat(
                 "applied": used_rewrite_retry,
             }
 
-    if not reranked or reranked[0].score < settings.low_confidence_threshold:
+    generation_enabled = bool(getattr(settings, "rag_generate_answers_enabled", True))
+
+    if generation_enabled and (
+        not reranked or reranked[0].score < settings.low_confidence_threshold
+    ):
         payload = {
             "answer": (
                 "I could not find strong evidence in the uploaded documents. "
@@ -527,6 +553,7 @@ def run_chat(
             ),
             "summary": None,
             "citations": [],
+            "chunks": None,
             "selected_doc_ids": [m.doc_id for m in selected_metas],
             "route": _route_label(selected_metas),
             "used_context_count": 0,
@@ -535,7 +562,7 @@ def run_chat(
         response_cache.set(response_key, payload)
         return payload
 
-    # Context budget selection + grounded generation.
+    # Context budget selection for either retrieval-only or grounded generation.
     t_context = perf_counter()
     _stage_start(on_event, "context_select")
     doc_labels = {m.doc_id: m.filename for m in selected_metas if m.filename}
@@ -546,6 +573,41 @@ def run_chat(
 
     source_url_by_doc_id = {m.doc_id: getattr(m, "source_url", "") for m in selected_metas}
 
+    citations = _consolidate_citations(
+        items=selected,
+        source_url_by_doc_id=source_url_by_doc_id,
+    )
+
+    if not generation_enabled:
+        _emit(
+            on_event,
+            "info",
+            {
+                "stage": "generate",
+                "skipped": True,
+                "reason": "rag_generate_answers_disabled",
+            },
+        )
+        payload = {
+            "answer": "",
+            "summary": None,
+            "citations": citations,
+            "chunks": _build_chunk_payload(selected),
+            "selected_doc_ids": [m.doc_id for m in selected_metas],
+            "route": _route_label(selected_metas),
+            "used_context_count": len(selected),
+            "debug": debug_info,
+        }
+        response_cache.set(response_key, payload)
+        logger.info(
+            "chat_complete generation_enabled=%s selected_docs=%d used_context=%d elapsed_ms=%d",
+            generation_enabled,
+            len(selected_metas),
+            len(selected),
+            int((perf_counter() - started) * 1000),
+        )
+        return payload
+
     t_generate = perf_counter()
     _stage_start(on_event, "generate")
     answer, summary = generate_answer_and_summary(
@@ -555,15 +617,11 @@ def run_chat(
     )
     _stage_end(on_event, "generate", int((perf_counter() - t_generate) * 1000))
 
-    citations = _consolidate_citations(
-        items=selected,
-        source_url_by_doc_id=source_url_by_doc_id,
-    )
-
     payload = {
         "answer": answer,
         "summary": summary or None,
         "citations": citations,
+        "chunks": None,
         "selected_doc_ids": [m.doc_id for m in selected_metas],
         "route": _route_label(selected_metas),
         "used_context_count": len(selected),
