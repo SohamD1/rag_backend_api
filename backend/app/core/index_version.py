@@ -11,16 +11,26 @@ def compute_index_version(*, settings: Settings, route: str) -> str:
     snapshot: Dict[str, Any] = {
         "schema": settings.index_schema_version,
         "route": route,
+        "ocr": {
+            "base_url": settings.mistral_base_url,
+            "model": settings.mistral_ocr_model,
+            "timeout_seconds": settings.mistral_ocr_timeout_seconds,
+            "delete_uploaded_file": settings.mistral_ocr_delete_uploaded_file,
+        },
         "embedding_model": settings.openai_embedding_model,
         "embedding_dimensions": settings.openai_embedding_dimensions,
         "tree_model": settings.openai_tree_model,
         "chunking": {
+            "logic_version": settings.chunking_logic_version,
             "target": settings.chunk_target_tokens,
             "min": settings.chunk_min_tokens,
             "max": settings.chunk_max_tokens,
             "overlap": settings.chunk_overlap_tokens,
         },
         "tree": {
+            "heading_preview_tokens": 250,
+            "leaf_max_tokens": 900,
+            "leaf_split_overlap_tokens": 80,
             "toc_check_page_num": settings.toc_check_page_num,
             "max_pages_per_node": settings.max_pages_per_node,
             "max_tokens_per_node": settings.max_tokens_per_node,

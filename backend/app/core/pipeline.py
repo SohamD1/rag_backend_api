@@ -362,6 +362,7 @@ def run_chat(
                         query_embedding=retrieval_embedding_local,
                         settings=settings,
                         vector_store=vector_store,
+                        index_version=meta.index_version,
                         top_k=settings.retrieve_top_k,
                     )
                 return meta.doc_id, items, local_debug
@@ -417,31 +418,33 @@ def run_chat(
         t_fetch = perf_counter()
         _stage_start(on_event, stage_rerank_fetch)
         candidates = ordered_for_fetch[: max(0, int(settings.rerank_candidate_k))]
-        ids_by_doc: Dict[str, List[str]] = {}
+        ids_by_namespace: Dict[str, List[str]] = {}
         for item in candidates:
-            if item.doc_id and item.source_id:
-                ids_by_doc.setdefault(item.doc_id, []).append(item.source_id)
+            namespace = item.vector_namespace or item.doc_id
+            if namespace and item.source_id:
+                ids_by_namespace.setdefault(namespace, []).append(item.source_id)
         embedding_by_key: Dict[tuple[str, str], List[float]] = {}
-        if ids_by_doc:
-            with ThreadPoolExecutor(max_workers=min(6, len(ids_by_doc))) as executor:
+        if ids_by_namespace:
+            with ThreadPoolExecutor(max_workers=min(6, len(ids_by_namespace))) as executor:
                 futures = {
-                    executor.submit(vector_store.fetch, ids=ids, namespace=doc_id): doc_id
-                    for doc_id, ids in ids_by_doc.items()
+                    executor.submit(vector_store.fetch, ids=ids, namespace=namespace): namespace
+                    for namespace, ids in ids_by_namespace.items()
                 }
                 for future in as_completed(futures):
-                    doc_id = futures[future]
+                    namespace = futures[future]
                     try:
                         id_to_values = future.result() or {}
                     except Exception:
                         continue
                     for source_id, emb in id_to_values.items():
                         if emb:
-                            embedding_by_key[(doc_id, source_id)] = emb
+                            embedding_by_key[(namespace, source_id)] = emb
 
         if embedding_by_key:
             next_results: List[RetrievalItem] = []
             for item in results_local:
-                emb = embedding_by_key.get((item.doc_id, item.source_id))
+                namespace = item.vector_namespace or item.doc_id
+                emb = embedding_by_key.get((namespace, item.source_id))
                 if emb is not None:
                     next_results.append(
                         RetrievalItem(
@@ -456,6 +459,7 @@ def run_chat(
                             page_end=item.page_end,
                             section_title=item.section_title,
                             route=item.route,
+                            vector_namespace=item.vector_namespace,
                             embedding=emb,
                         )
                     )

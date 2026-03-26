@@ -16,34 +16,60 @@ class Chunk:
     page_start: int
     page_end: int
     section_title: Optional[str]
+    layout_mode: str
 
 
 @dataclass(frozen=True)
 class _Block:
     text: str
     page_num: int
+    layout_mode: str
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+_BULLET_RE = re.compile(r"^\s*(?:[-*•]|[0-9]+[.)]|[A-Za-z][.)])\s+")
 
 
 def _normalize(text: str) -> str:
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
-    # PDFs often contain hard line breaks; treat single newlines as spaces while
-    # preserving explicit paragraph breaks (blank lines).
-    raw = re.sub(r"(?<!\n)\n(?!\n)", " ", raw)
     # Collapse excessive blank lines to a single paragraph break.
     raw = re.sub(r"\n{3,}", "\n\n", raw)
     return raw
 
 
+def _should_preserve_line_breaks(text: str) -> bool:
+    lines = [line.strip() for line in (text or "").split("\n") if line.strip()]
+    if len(lines) < 3:
+        return False
+
+    short_lines = sum(1 for line in lines if len(line) <= 80)
+    bullet_lines = sum(1 for line in lines if _BULLET_RE.match(line))
+    tableish_lines = sum(
+        1
+        for line in lines
+        if "|" in line
+        or "\t" in line
+        or re.search(r"\S\s{2,}\S", line)
+    )
+    short_ratio = short_lines / max(1, len(lines))
+    return bullet_lines >= 2 or tableish_lines >= 2 or short_ratio >= 0.6
+
+
 def _iter_paragraphs(page: PageText) -> Iterable[_Block]:
     normalized = _normalize(page.text)
-    parts = [p.strip() for p in normalized.split("\n\n")]
+    if _should_preserve_line_breaks(normalized):
+        parts = [p.strip() for p in normalized.split("\n") if p.strip()]
+        layout_mode = "preserve_lines"
+    else:
+        # PDFs often contain hard line breaks; treat single newlines as spaces while
+        # preserving explicit paragraph breaks (blank lines).
+        normalized = re.sub(r"(?<!\n)\n(?!\n)", " ", normalized)
+        parts = [p.strip() for p in normalized.split("\n\n")]
+        layout_mode = "flow_text"
     for part in parts:
         if not part:
             continue
-        yield _Block(text=part, page_num=page.page_num)
+        yield _Block(text=part, page_num=page.page_num, layout_mode=layout_mode)
 
 
 def _split_by_token_window(
@@ -88,7 +114,7 @@ def _split_oversized_block(
     sentences = [s.strip() for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
     if len(sentences) <= 1:
         parts = _split_by_token_window(text, model=model, max_tokens=max_tokens)
-        return [_Block(text=p, page_num=block.page_num) for p in parts]
+        return [_Block(text=p, page_num=block.page_num, layout_mode=block.layout_mode) for p in parts]
 
     parts: List[str] = []
     buf: List[str] = []
@@ -115,7 +141,7 @@ def _split_oversized_block(
     if buf:
         parts.append(" ".join(buf).strip())
 
-    return [_Block(text=p, page_num=block.page_num) for p in parts if p]
+    return [_Block(text=p, page_num=block.page_num, layout_mode=block.layout_mode) for p in parts if p]
 
 
 def chunk_document(
@@ -184,6 +210,7 @@ def chunk_document(
                         if page_start == page_end
                         else f"Pages {page_start}-{page_end}"
                     ),
+                    layout_mode=buf[0].layout_mode if buf else "flow_text",
                 )
             )
         buf = overlap_tail(buf)
@@ -236,6 +263,7 @@ def chunk_document(
                         if page_start == page_end
                         else f"Pages {page_start}-{page_end}"
                     ),
+                    layout_mode=buf[0].layout_mode if buf else "flow_text",
                 )
             )
     return chunks

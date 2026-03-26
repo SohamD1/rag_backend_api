@@ -1,19 +1,28 @@
 from __future__ import annotations
 
 from pathlib import Path
+from dataclasses import dataclass
 from typing import Dict, List
 
 from app.adapters.embeddings import embed_texts
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.config import Settings
 from app.core.chunking import chunk_document
-from app.core.doc_summaries import compute_centroid, upsert_doc_centroid
+from app.core.doc_summaries import compute_centroid
 from app.core.pdf_text import PageText
+from app.core.vector_namespace import vector_namespace
 from app.services.tree_index import TreeNode, build_tree, save_headings, save_tree, trace_path
 
 
 def _file_url(doc_id: str) -> str:
     return f"/api/v1/documents/{doc_id}/file"
+
+
+@dataclass(frozen=True)
+class IndexBuildResult:
+    indexed_count: int
+    centroid: List[float]
+    namespace: str
 
 
 def build_standard_index(
@@ -28,7 +37,7 @@ def build_standard_index(
     settings: Settings,
     vector_store: PineconeVectorStore,
     index_version: str,
-) -> int:
+) -> IndexBuildResult:
     chunks = chunk_document(
         doc_id=doc_id,
         pages=pages,
@@ -42,21 +51,9 @@ def build_standard_index(
     embeddings = embed_texts(texts, settings)
 
     centroid = compute_centroid(embeddings)
-    upsert_doc_centroid(
-        doc_id=doc_id,
-        slug=slug,
-        filename=filename,
-        source_url=source_url,
-        route="standard",
-        page_count=page_count,
-        token_count=token_count,
-        index_version=index_version,
-        centroid=centroid,
-        settings=settings,
-        vector_store=vector_store,
-    )
 
     file_url = _file_url(doc_id)
+    namespace = vector_namespace(doc_id, index_version)
     items = []
     for chunk, emb in zip(chunks, embeddings):
         items.append(
@@ -74,18 +71,16 @@ def build_standard_index(
                     "page_end": chunk.page_end,
                     "section_title": chunk.section_title,
                     "text": chunk.text,
+                    "layout_mode": chunk.layout_mode,
+                    "ocr_used": True,
                     "route": "standard",
+                    "index_version": index_version,
                 },
             }
         )
 
-    # Clear namespace to avoid duplicates on rebuild.
-    try:
-        vector_store.clear_namespace(doc_id)
-    except Exception:
-        pass
-    vector_store.upsert(items, namespace=doc_id)
-    return len(items)
+    vector_store.upsert(items, namespace=namespace)
+    return IndexBuildResult(indexed_count=len(items), centroid=centroid, namespace=namespace)
 
 
 def build_tree_index(
@@ -101,11 +96,12 @@ def build_tree_index(
     vector_store: PineconeVectorStore,
     tree_dir: Path,
     index_version: str,
-) -> int:
+) -> IndexBuildResult:
     nodes = build_tree(doc_id, pages, settings)
     save_tree(doc_id, nodes, tree_dir, index_version=index_version)
     save_headings(doc_id, nodes, tree_dir, index_version=index_version)
     file_url = _file_url(doc_id)
+    namespace = vector_namespace(doc_id, index_version)
 
     def breadcrumb_for(node_id: str) -> str:
         path = trace_path(nodes, node_id)
@@ -151,35 +147,20 @@ def build_tree_index(
                 "summary": (node.summary or "") if node.level != "paragraph" else "",
                 "breadcrumb": breadcrumb,
                 "section_id": section_id_for(node.node_id),
+                "ocr_used": True,
                 "route": "tree",
+                "index_version": index_version,
             }
         )
 
     embeddings = embed_texts(embed_inputs, settings)
 
     centroid = compute_centroid(embeddings)
-    upsert_doc_centroid(
-        doc_id=doc_id,
-        slug=slug,
-        filename=filename,
-        source_url=source_url,
-        route="tree",
-        page_count=page_count,
-        token_count=token_count,
-        index_version=index_version,
-        centroid=centroid,
-        settings=settings,
-        vector_store=vector_store,
-    )
 
     items = [
         {"id": node.node_id, "values": emb, "metadata": meta}
         for node, emb, meta in zip(nodes_to_embed, embeddings, metadatas)
     ]
 
-    try:
-        vector_store.clear_namespace(doc_id)
-    except Exception:
-        pass
-    vector_store.upsert(items, namespace=doc_id)
-    return len(items)
+    vector_store.upsert(items, namespace=namespace)
+    return IndexBuildResult(indexed_count=len(items), centroid=centroid, namespace=namespace)

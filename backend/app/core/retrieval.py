@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.config import Settings
+from app.core.vector_namespace import vector_namespace
 from app.core.tree_search import select_tree_nodes_with_llm
 from app.services.tree_index import load_headings
 
@@ -24,6 +25,7 @@ class RetrievalItem:
     page_end: int
     section_title: Optional[str]
     route: str
+    vector_namespace: Optional[str] = None
     embedding: Optional[List[float]] = None
 
 
@@ -40,6 +42,7 @@ def retrieval_item_to_dict(item: RetrievalItem) -> Dict:
         "page_end": item.page_end,
         "section_title": item.section_title,
         "route": item.route,
+        "vector_namespace": item.vector_namespace,
     }
 
 
@@ -56,6 +59,7 @@ def retrieval_item_from_dict(payload: Dict) -> RetrievalItem:
         page_end=int(payload.get("page_end", 1)),
         section_title=payload.get("section_title"),
         route=str(payload.get("route", "standard")),
+        vector_namespace=payload.get("vector_namespace"),
     )
 
 
@@ -65,13 +69,15 @@ def retrieve_standard_for_doc(
     query_embedding: List[float],
     settings: Settings,
     vector_store: PineconeVectorStore,
+    index_version: Optional[str] = None,
     top_k: Optional[int] = None,
 ) -> List[RetrievalItem]:
     limit = int(top_k or settings.retrieve_top_k)
+    namespace = vector_namespace(doc_id, index_version) if index_version else doc_id
     matches = vector_store.query(
         vector=query_embedding,
         top_k=limit,
-        namespace=doc_id,
+        namespace=namespace,
     )
     items: List[RetrievalItem] = []
     for match in matches:
@@ -89,6 +95,7 @@ def retrieve_standard_for_doc(
                 page_end=int(meta.get("page_end", 1)),
                 section_title=meta.get("section_title"),
                 route=str(meta.get("route") or "standard"),
+                vector_namespace=namespace,
             )
         )
     return items
@@ -107,6 +114,7 @@ def retrieve_tree_for_doc(
     index_version: Optional[str] = None,
 ) -> List[RetrievalItem]:
     limit = int(top_k or settings.retrieve_top_k)
+    namespace = vector_namespace(doc_id, index_version) if index_version else doc_id
     mode = str(getattr(settings, "tree_node_selection_mode", "vector_only") or "vector_only").strip().lower()
     if mode not in {"vector_only", "vector_then_llm", "llm_then_vector"}:
         mode = "vector_only"
@@ -126,7 +134,7 @@ def retrieve_tree_for_doc(
                     vector_store.query,
                     vector=query_embedding,
                     top_k=int(heading_top_k),
-                    namespace=doc_id,
+                    namespace=namespace,
                     filter={"level": {"$eq": level}},
                 )
                 for level in heading_levels
@@ -163,7 +171,7 @@ def retrieve_tree_for_doc(
                         vector_store.query,
                         vector=query_embedding,
                         top_k=int(per_section_top_k),
-                        namespace=doc_id,
+                        namespace=namespace,
                         filter={"level": {"$eq": "paragraph"}, "section_id": {"$eq": sid}},
                     )
                     for sid in section_ids
@@ -177,7 +185,7 @@ def retrieve_tree_for_doc(
             paragraph_results = vector_store.query(
                 vector=query_embedding,
                 top_k=limit,
-                namespace=doc_id,
+                namespace=namespace,
                 filter={"level": {"$eq": "paragraph"}},
             )
 
@@ -200,6 +208,7 @@ def retrieve_tree_for_doc(
                     page_end=int(meta.get("page_end", 1)),
                     section_title=meta.get("breadcrumb") or meta.get("title"),
                     route="tree",
+                    vector_namespace=namespace,
                 )
             )
 
@@ -279,7 +288,7 @@ def retrieve_tree_for_doc(
             return vector_store.query(
                 vector=query_embedding,
                 top_k=limit,
-                namespace=doc_id,
+                namespace=namespace,
                 filter={"level": {"$eq": "paragraph"}},
             )
         per_section_top_k = max(limit * 5, 25)
@@ -290,7 +299,7 @@ def retrieve_tree_for_doc(
                     vector_store.query,
                     vector=query_embedding,
                     top_k=int(per_section_top_k),
-                    namespace=doc_id,
+                    namespace=namespace,
                     filter={"level": {"$eq": "paragraph"}, "section_id": {"$eq": sid}},
                 )
                 for sid in section_ids
@@ -314,7 +323,7 @@ def retrieve_tree_for_doc(
             return vector_store.query(
                 vector=query_embedding,
                 top_k=int(per_query_top_k),
-                namespace=doc_id,
+                namespace=namespace,
                 filter={"level": {"$eq": "paragraph"}, "parent_id": {"$in": parent_ids}},
             )
         except Exception:
@@ -326,7 +335,7 @@ def retrieve_tree_for_doc(
                         vector_store.query,
                         vector=query_embedding,
                         top_k=int(max(10, limit)),
-                        namespace=doc_id,
+                        namespace=namespace,
                         filter={"level": {"$eq": "paragraph"}, "parent_id": {"$eq": pid}},
                     )
                     for pid in parent_ids[:50]
@@ -431,6 +440,7 @@ def retrieve_tree_for_doc(
                 page_end=int(meta.get("page_end", 1)),
                 section_title=meta.get("breadcrumb") or meta.get("title"),
                 route="tree",
+                vector_namespace=namespace,
             )
         )
 

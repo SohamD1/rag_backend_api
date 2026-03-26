@@ -7,6 +7,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from uuid import uuid4
 
 from app.adapters.openai_client import chat_completions_create, get_openai_client
 from app.config import Settings
@@ -24,6 +25,17 @@ TOC_FIX_TEXT_MAX_TOKENS = 8000
 
 
 logger = logging.getLogger(__name__)
+
+
+def _atomic_write_json(path: Path, payload: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=True))
+        tmp_path.replace(path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
 
 
 @dataclass
@@ -1198,7 +1210,7 @@ def save_tree(doc_id: str, nodes: Dict[str, TreeNode], base_dir: Path, index_ver
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / "tree.json"
     data = {node_id: asdict(node) for node_id, node in nodes.items()}
-    path.write_text(json.dumps(data, indent=2))
+    _atomic_write_json(path, data)
     return path
 
 
@@ -1235,7 +1247,7 @@ def save_headings(doc_id: str, nodes: Dict[str, TreeNode], base_dir: Path, index
             "section_id": section_ancestor(nid),
         }
 
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=True))
+    _atomic_write_json(path, data)
     return path
 
 

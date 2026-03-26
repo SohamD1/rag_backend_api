@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
@@ -16,9 +17,11 @@ from app.config import (
     resolve_tree_dir,
     settings,
 )
+from app.core.doc_summaries import upsert_doc_centroid
 from app.core.index_version import compute_index_version
-from app.core.indexing import build_standard_index, build_tree_index
+from app.core.indexing import IndexBuildResult, build_standard_index, build_tree_index
 from app.core.tokens import estimate_tokens
+from app.core.vector_namespace import vector_namespace
 from app.storage.local_store import save_upload
 from app.storage.registry import DocMeta, DocRegistry, now_utc_iso
 from app.adapters.mistral_ocr import MistralOcrError, ocr_pdf_to_pages
@@ -40,10 +43,14 @@ class IngestState:
     storage_path: Path | None = None
     storage_created: bool = False
     had_existing_doc: bool = False
+    previous_meta: DocMeta | None = None
+    previous_doc_summary: List[float] | None = None
     route: str | None = None
     index_version: str | None = None
+    target_namespace: str | None = None
     target_tree_artifacts_existed: bool = False
     registry_saved: bool = False
+    doc_summary_saved: bool = False
     stage: str = "init"
 
 
@@ -92,33 +99,77 @@ def _cleanup_failed_ingest(
         state.index_version,
     )
 
-    if vector_store is not None and not state.had_existing_doc:
-        try:
-            vector_store.clear_namespace(state.doc_id)
-        except Exception:
-            logger.exception(
-                "ingest_cleanup_failed step=clear_namespace doc_id=%s",
+    previous_namespace = (
+        vector_namespace(state.previous_meta.doc_id, state.previous_meta.index_version)
+        if state.previous_meta is not None
+        else None
+    )
+
+    if vector_store is not None and state.target_namespace:
+        should_clear_target_namespace = (
+            not state.had_existing_doc or state.target_namespace != previous_namespace
+        )
+        if should_clear_target_namespace:
+            try:
+                vector_store.clear_namespace(state.target_namespace)
+            except Exception:
+                logger.exception(
+                    "ingest_cleanup_failed step=clear_namespace namespace=%s doc_id=%s",
+                    state.target_namespace,
+                    state.doc_id,
+                )
+        else:
+            logger.warning(
+                "ingest_cleanup_preserved_existing_vectors doc_id=%s stage=%s namespace=%s",
                 state.doc_id,
+                state.stage,
+                state.target_namespace,
             )
 
-        try:
-            vector_store.delete_ids([state.doc_id], namespace=settings.doc_summary_namespace)
-        except Exception:
-            logger.exception(
-                "ingest_cleanup_failed step=delete_doc_summary doc_id=%s",
+        if not state.had_existing_doc:
+            try:
+                vector_store.delete_ids([state.doc_id], namespace=settings.doc_summary_namespace)
+            except Exception:
+                logger.exception(
+                    "ingest_cleanup_failed step=delete_doc_summary doc_id=%s",
+                    state.doc_id,
+                )
+        elif state.doc_summary_saved and state.previous_meta and state.previous_doc_summary:
+            try:
+                upsert_doc_centroid(
+                    doc_id=state.previous_meta.doc_id,
+                    slug=state.previous_meta.slug,
+                    filename=state.previous_meta.filename,
+                    source_url=state.previous_meta.source_url,
+                    route=state.previous_meta.route,
+                    page_count=state.previous_meta.page_count,
+                    token_count=state.previous_meta.token_count,
+                    index_version=state.previous_meta.index_version,
+                    centroid=state.previous_doc_summary,
+                    settings=settings,
+                    vector_store=vector_store,
+                )
+            except Exception:
+                logger.exception(
+                    "ingest_cleanup_failed step=restore_doc_summary doc_id=%s",
+                    state.doc_id,
+                )
+        elif state.doc_summary_saved and state.had_existing_doc:
+            logger.warning(
+                "ingest_cleanup_doc_summary_not_restored doc_id=%s reason=%s",
                 state.doc_id,
+                "missing_previous_summary",
             )
-    elif vector_store is not None and state.had_existing_doc:
-        logger.warning(
-            "ingest_cleanup_preserved_existing_vectors doc_id=%s stage=%s",
-            state.doc_id,
-            state.stage,
-        )
 
     if (
         state.route == "tree"
         and state.index_version
-        and (not state.had_existing_doc or not state.target_tree_artifacts_existed)
+        and (
+            not state.had_existing_doc
+            or not state.previous_meta
+            or state.previous_meta.index_version != state.index_version
+            or not state.target_tree_artifacts_existed
+        )
     ):
         try:
             _delete_tree_artifacts(state.doc_id, state.index_version)
@@ -154,22 +205,66 @@ def _cleanup_failed_ingest(
                 "ingest_cleanup_failed step=delete_registry doc_id=%s",
                 state.doc_id,
             )
+    elif state.registry_saved and state.had_existing_doc and state.previous_meta is not None:
+        try:
+            registry.save(state.previous_meta)
+        except Exception:
+            logger.exception(
+                "ingest_cleanup_failed step=restore_registry doc_id=%s",
+                state.doc_id,
+            )
     elif state.registry_saved and state.had_existing_doc:
-        logger.warning(
-            "ingest_cleanup_preserved_existing_registry doc_id=%s",
-            state.doc_id,
-        )
+        logger.warning("ingest_cleanup_preserved_existing_registry doc_id=%s", state.doc_id)
+
+
+def _finalize_superseded_index(
+    *,
+    state: IngestState,
+    vector_store: PineconeVectorStore | None,
+) -> None:
+    previous_meta = state.previous_meta
+    if previous_meta is None or state.index_version is None:
+        return
+    if previous_meta.index_version == state.index_version:
+        return
+
+    old_namespace = vector_namespace(previous_meta.doc_id, previous_meta.index_version)
+    if vector_store is not None:
+        try:
+            vector_store.clear_namespace(old_namespace)
+        except Exception:
+            logger.exception(
+                "ingest_finalize_failed step=clear_old_namespace namespace=%s doc_id=%s",
+                old_namespace,
+                previous_meta.doc_id,
+            )
+
+    if previous_meta.route == "tree":
+        try:
+            _delete_tree_artifacts(previous_meta.doc_id, previous_meta.index_version)
+        except Exception:
+            logger.exception(
+                "ingest_finalize_failed step=delete_old_tree_artifacts doc_id=%s index_version=%s",
+                previous_meta.doc_id,
+                previous_meta.index_version,
+            )
 
 
 def _delete_document_vectors(
     *,
     doc_id: str,
+    index_version: str,
     vector_store: PineconeVectorStore,
 ) -> None:
+    namespace = vector_namespace(doc_id, index_version)
     try:
-        vector_store.clear_namespace(doc_id)
+        vector_store.clear_namespace(namespace)
     except Exception as exc:
-        logger.exception("delete_failed step=clear_namespace doc_id=%s", doc_id)
+        logger.exception(
+            "delete_failed step=clear_namespace doc_id=%s namespace=%s",
+            doc_id,
+            namespace,
+        )
         raise HTTPException(
             status_code=502,
             detail={
@@ -177,6 +272,7 @@ def _delete_document_vectors(
                 "doc_id": doc_id,
                 "failed_step": "clear_namespace",
                 "cleanup_status": "local_state_preserved",
+                "namespace": namespace,
                 "error": str(exc),
             },
         ) from exc
@@ -198,8 +294,11 @@ def _delete_document_vectors(
 
 
 def _delete_local_document_artifacts(meta: DocMeta) -> None:
-    if meta.route == "tree":
-        _delete_tree_artifacts(meta.doc_id, meta.index_version)
+    doc_tree_dir = TREE_DIR / meta.doc_id
+    if doc_tree_dir.exists():
+        for version_dir in sorted(doc_tree_dir.glob("*"), reverse=True):
+            if version_dir.is_dir():
+                _delete_tree_artifacts(meta.doc_id, version_dir.name)
 
     storage_path = Path(meta.storage_path)
     if storage_path.exists():
@@ -235,6 +334,41 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
 
     existing = registry.get(stored.doc_id)
     state.had_existing_doc = existing is not None
+    state.previous_meta = existing
+
+    if existing is not None:
+        current_existing_route = (
+            "tree" if existing.page_count > settings.page_tree_threshold else "standard"
+        )
+        current_existing_index_version = compute_index_version(
+            settings=settings, route=current_existing_route
+        )
+        existing_tree_ready = bool(
+            current_existing_route != "tree"
+            or (
+                _tree_path(existing.doc_id, current_existing_index_version).exists()
+                and _headings_path(existing.doc_id, current_existing_index_version).exists()
+            )
+        )
+        existing_storage_ready = Path(existing.storage_path).exists()
+        if (
+            source_url == existing.source_url
+            and existing.route == current_existing_route
+            and existing.index_version == current_existing_index_version
+            and existing_storage_ready
+            and existing_tree_ready
+        ):
+            return DocumentCreateResponse(
+                doc_id=existing.doc_id,
+                slug=existing.slug,
+                filename=existing.filename,
+                source_url=existing.source_url,
+                page_count=existing.page_count,
+                token_count=existing.token_count,
+                route=existing.route,
+                index_version=existing.index_version,
+                file_url=_file_url(existing.doc_id),
+            )
 
     try:
         state.stage = "ocr"
@@ -261,6 +395,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
         index_version = compute_index_version(settings=settings, route=route)
         state.route = route
         state.index_version = index_version
+        state.target_namespace = vector_namespace(stored.doc_id, index_version)
 
         state.target_tree_artifacts_existed = bool(
             route == "tree"
@@ -285,8 +420,19 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
         state.stage = "index"
         try:
             vector_store = get_vector_store()
+            if existing is not None:
+                try:
+                    previous_doc_summary = vector_store.fetch(
+                        ids=[stored.doc_id], namespace=settings.doc_summary_namespace
+                    )
+                    state.previous_doc_summary = previous_doc_summary.get(stored.doc_id)
+                except Exception:
+                    logger.exception(
+                        "upload_failed stage=fetch_previous_doc_summary doc_id=%s",
+                        stored.doc_id,
+                    )
             if route == "tree":
-                indexed_count = build_tree_index(
+                build_result = build_tree_index(
                     doc_id=stored.doc_id,
                     slug=stored.slug,
                     filename=stored.filename,
@@ -300,7 +446,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
                     index_version=index_version,
                 )
             else:
-                indexed_count = build_standard_index(
+                build_result = build_standard_index(
                     doc_id=stored.doc_id,
                     slug=stored.slug,
                     filename=stored.filename,
@@ -342,6 +488,32 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
             raise HTTPException(status_code=500, detail=f"Failed to save document metadata: {exc}") from exc
 
         state.registry_saved = True
+        state.stage = "doc_summary"
+        try:
+            upsert_doc_centroid(
+                doc_id=stored.doc_id,
+                slug=stored.slug,
+                filename=stored.filename,
+                source_url=source_url,
+                route=route,
+                page_count=page_count,
+                token_count=token_count,
+                index_version=index_version,
+                centroid=build_result.centroid,
+                settings=settings,
+                vector_store=vector_store,
+            )
+        except Exception as exc:
+            logger.exception("upload_failed stage=doc_summary doc_id=%s", stored.doc_id)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Failed to update document summary index: {exc}",
+            ) from exc
+        state.doc_summary_saved = True
+
+        state.stage = "finalize"
+        _finalize_superseded_index(state=state, vector_store=vector_store)
+
         state.stage = "complete"
         logger.info(
             "upload_complete doc_id=%s route=%s pages=%d est_tokens=%d indexed=%d",
@@ -349,7 +521,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
             route,
             page_count,
             token_count,
-            indexed_count,
+            build_result.indexed_count,
         )
 
         return DocumentCreateResponse(
@@ -440,6 +612,10 @@ def delete_document(doc_id: str):
             },
         ) from exc
 
-    _delete_document_vectors(doc_id=doc_id, vector_store=vector_store)
+        _delete_document_vectors(
+            doc_id=doc_id,
+            index_version=meta.index_version,
+            vector_store=vector_store,
+        )
     _delete_local_document_artifacts(meta)
     return {"ok": True, "doc_id": doc_id}

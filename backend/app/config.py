@@ -99,6 +99,15 @@ class Settings:
     chunk_min_tokens: int = _get_env("CHUNK_MIN_TOKENS", 350, int)
     chunk_max_tokens: int = _get_env("CHUNK_MAX_TOKENS", 450, int)
     chunk_overlap_tokens: int = _get_env("CHUNK_OVERLAP_TOKENS", 40, int)
+    chunking_logic_version: str = _get_env("CHUNKING_LOGIC_VERSION", "v2_layout_aware")
+
+    # OCR config mirrored here for index-versioning and operational visibility.
+    mistral_base_url: str = _get_env("MISTRAL_BASE_URL", "https://api.mistral.ai")
+    mistral_ocr_model: str = _get_env("MISTRAL_OCR_MODEL", "mistral-ocr-latest")
+    mistral_ocr_timeout_seconds: float = _get_env("MISTRAL_OCR_TIMEOUT_SECONDS", 120.0, float)
+    mistral_ocr_delete_uploaded_file: bool = _get_env(
+        "MISTRAL_OCR_DELETE_UPLOADED_FILE", "true", cast=_bool_env
+    )
 
     # Doc selection via doc-summary centroid vectors
     doc_summary_namespace: str = _get_env("DOC_SUMMARY_NAMESPACE", "__doc_summaries")
