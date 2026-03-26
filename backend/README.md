@@ -8,8 +8,28 @@
    - `OPENAI_API_KEY`
    - `PINECONE_API_KEY`
    - `PINECONE_INDEX` (and `PINECONE_HOST` if needed)
+   - `MISTRAL_API_KEY` for PDF ingestion
+   - Auth for non-development environments:
+     - `APP_ENV=production` (or another non-development value)
+     - `KB_APP_TOKEN`
+     - `KB_ADMIN_TOKEN`
+     - Optional override: `KB_REQUIRE_AUTH=false` only if you intentionally want auth disabled
 4. Optional: set `RAG_GENERATE_ANSWERS_ENABLED=false` to run retrieval-only mode
    (`/api/v1/chat` returns selected chunks without LLM-generated answer text).
+
+Auth behavior:
+- In `APP_ENV=development`/`dev`/`local`/`test`, auth defaults to off unless `KB_REQUIRE_AUTH=true`.
+- In any other `APP_ENV`, auth defaults to on.
+- When auth is on, the backend now fails startup unless both `KB_APP_TOKEN` and `KB_ADMIN_TOKEN` are set.
+
+Token usage:
+- `Authorization: Bearer <KB_APP_TOKEN>` for `/api/v1/chat` and `/api/v1/chat/stream`
+- `Authorization: Bearer <KB_ADMIN_TOKEN>` for document admin endpoints
+
+OCR behavior:
+- `POST /api/v1/documents` always sends uploaded PDFs through Mistral OCR.
+- `MISTRAL_API_KEY` is therefore required for document ingestion.
+- The default `INDEX_SCHEMA_VERSION` is now `v4` so reingests pick up the OCR-only extraction path.
 
 ## Run
 From `backend/`:
@@ -21,7 +41,6 @@ python -m uvicorn app.main:app --reload --port 8000
 ## API
 - `GET /api/health` (liveness; always returns `{"status":"ok"}` if the app is running)
 - `GET /api/health/deps` (readiness/config; checks whether required env vars are present)
-- `GET /api/health/deps?deep=true` (readiness/deep; actively calls OpenAI + Pinecone)
 - `POST /api/v1/documents` (multipart/form-data: `file`)
 - `GET /api/v1/documents`
 - `GET /api/v1/documents/{doc_id}/file`

@@ -19,6 +19,7 @@ class StoredFile:
     filename: str
     checksum: str
     size_bytes: int
+    created: bool
 
 
 def ensure_dir(path: Path) -> None:
@@ -47,6 +48,7 @@ def save_upload(upload: UploadFile, storage_dir: Path) -> StoredFile:
     checksum = hasher.hexdigest()
     doc_id = f"{slug}__{checksum[:8]}"
     path = storage_dir / f"{doc_id}{suffix}"
+    created = not path.exists()
     if path.exists():
         tmp_path.unlink(missing_ok=True)
     else:
@@ -59,6 +61,7 @@ def save_upload(upload: UploadFile, storage_dir: Path) -> StoredFile:
         filename=upload.filename or f"{doc_id}{suffix}",
         checksum=checksum,
         size_bytes=size_bytes,
+        created=created,
     )
 
 
@@ -86,6 +89,7 @@ def save_local_file(source_path: Path, storage_dir: Path) -> StoredFile:
     checksum = hasher.hexdigest()
     doc_id = f"{slug}__{checksum[:8]}"
     dest_path = storage_dir / f"{doc_id}{suffix}"
+    created = not dest_path.exists()
     if not dest_path.exists():
         tmp_path = storage_dir / f".ingest_{uuid4().hex}{suffix}"
         with source_path.open("rb") as src, tmp_path.open("wb") as dst:
@@ -99,4 +103,5 @@ def save_local_file(source_path: Path, storage_dir: Path) -> StoredFile:
         filename=source_path.name,
         checksum=checksum,
         size_bytes=size_bytes,
+        created=created,
     )

@@ -1,5 +1,5 @@
 import logging
-import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -18,7 +18,6 @@ from app.config import (
 )
 from app.core.index_version import compute_index_version
 from app.core.indexing import build_standard_index, build_tree_index
-from app.core.pdf_text import PageText, extract_pages
 from app.core.tokens import estimate_tokens
 from app.storage.local_store import save_upload
 from app.storage.registry import DocMeta, DocRegistry, now_utc_iso
@@ -35,6 +34,19 @@ STORAGE_DIR = resolve_storage_dir(settings)
 registry = DocRegistry(DOCS_DIR)
 
 
+@dataclass
+class IngestState:
+    doc_id: str | None = None
+    storage_path: Path | None = None
+    storage_created: bool = False
+    had_existing_doc: bool = False
+    route: str | None = None
+    index_version: str | None = None
+    target_tree_artifacts_existed: bool = False
+    registry_saved: bool = False
+    stage: str = "init"
+
+
 def _file_url(doc_id: str) -> str:
     return f"/api/v1/documents/{doc_id}/file"
 
@@ -46,45 +58,154 @@ def _tree_path(doc_id: str, index_version: str) -> Path:
 def _headings_path(doc_id: str, index_version: str) -> Path:
     return TREE_DIR / doc_id / index_version / "headings.json"
 
-def _int_env(name: str, default: int) -> int:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return int(default)
+
+def _delete_tree_artifacts(doc_id: str, index_version: str) -> None:
+    tree_path = _tree_path(doc_id, index_version)
+    if tree_path.exists():
+        tree_path.unlink()
+
+    headings_path = _headings_path(doc_id, index_version)
+    if headings_path.exists():
+        headings_path.unlink()
+
+    parent = tree_path.parent
+    if parent.exists() and not any(parent.iterdir()):
+        parent.rmdir()
+    parent2 = parent.parent
+    if parent2.exists() and not any(parent2.iterdir()):
+        parent2.rmdir()
+
+
+def _cleanup_failed_ingest(
+    *,
+    state: IngestState,
+    vector_store: PineconeVectorStore | None,
+) -> None:
+    if not state.doc_id:
+        return
+
+    logger.warning(
+        "ingest_cleanup_started doc_id=%s stage=%s route=%s index_version=%s",
+        state.doc_id,
+        state.stage,
+        state.route,
+        state.index_version,
+    )
+
+    if vector_store is not None and not state.had_existing_doc:
+        try:
+            vector_store.clear_namespace(state.doc_id)
+        except Exception:
+            logger.exception(
+                "ingest_cleanup_failed step=clear_namespace doc_id=%s",
+                state.doc_id,
+            )
+
+        try:
+            vector_store.delete_ids([state.doc_id], namespace=settings.doc_summary_namespace)
+        except Exception:
+            logger.exception(
+                "ingest_cleanup_failed step=delete_doc_summary doc_id=%s",
+                state.doc_id,
+            )
+    elif vector_store is not None and state.had_existing_doc:
+        logger.warning(
+            "ingest_cleanup_preserved_existing_vectors doc_id=%s stage=%s",
+            state.doc_id,
+            state.stage,
+        )
+
+    if (
+        state.route == "tree"
+        and state.index_version
+        and (not state.had_existing_doc or not state.target_tree_artifacts_existed)
+    ):
+        try:
+            _delete_tree_artifacts(state.doc_id, state.index_version)
+        except Exception:
+            logger.exception(
+                "ingest_cleanup_failed step=delete_tree_artifacts doc_id=%s index_version=%s",
+                state.doc_id,
+                state.index_version,
+            )
+    elif state.route == "tree" and state.index_version and state.target_tree_artifacts_existed:
+        logger.warning(
+            "ingest_cleanup_preserved_existing_tree_artifacts doc_id=%s index_version=%s",
+            state.doc_id,
+            state.index_version,
+        )
+
+    if state.storage_created and state.storage_path is not None:
+        try:
+            if state.storage_path.exists():
+                state.storage_path.unlink()
+        except Exception:
+            logger.exception(
+                "ingest_cleanup_failed step=delete_pdf doc_id=%s path=%s",
+                state.doc_id,
+                state.storage_path,
+            )
+
+    if state.registry_saved and not state.had_existing_doc:
+        try:
+            registry.delete(state.doc_id)
+        except Exception:
+            logger.exception(
+                "ingest_cleanup_failed step=delete_registry doc_id=%s",
+                state.doc_id,
+            )
+    elif state.registry_saved and state.had_existing_doc:
+        logger.warning(
+            "ingest_cleanup_preserved_existing_registry doc_id=%s",
+            state.doc_id,
+        )
+
+
+def _delete_document_vectors(
+    *,
+    doc_id: str,
+    vector_store: PineconeVectorStore,
+) -> None:
     try:
-        return int(str(raw).strip())
-    except Exception:
-        return int(default)
+        vector_store.clear_namespace(doc_id)
+    except Exception as exc:
+        logger.exception("delete_failed step=clear_namespace doc_id=%s", doc_id)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Document delete aborted because vector cleanup failed.",
+                "doc_id": doc_id,
+                "failed_step": "clear_namespace",
+                "cleanup_status": "local_state_preserved",
+                "error": str(exc),
+            },
+        ) from exc
 
-
-def _float_env(name: str, default: float) -> float:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return float(default)
     try:
-        return float(str(raw).strip())
-    except Exception:
-        return float(default)
+        vector_store.delete_ids([doc_id], namespace=settings.doc_summary_namespace)
+    except Exception as exc:
+        logger.exception("delete_failed step=delete_doc_summary doc_id=%s", doc_id)
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": "Document delete aborted because vector cleanup failed.",
+                "doc_id": doc_id,
+                "failed_step": "delete_doc_summary",
+                "cleanup_status": "local_state_preserved",
+                "error": str(exc),
+            },
+        ) from exc
 
 
-def _should_ocr(pages: list[PageText]) -> bool:
-    if not pages:
-        return True
-    min_chars = max(0, _int_env("KB_OCR_MIN_CHARS_PER_PAGE", 50))
-    min_ratio = max(0.0, min(1.0, _float_env("KB_OCR_MIN_TEXT_PAGE_RATIO", 0.4)))
+def _delete_local_document_artifacts(meta: DocMeta) -> None:
+    if meta.route == "tree":
+        _delete_tree_artifacts(meta.doc_id, meta.index_version)
 
-    text_pages = 0
-    for p in pages:
-        c = len("".join((p.text or "").split()))
-        if c >= min_chars:
-            text_pages += 1
+    storage_path = Path(meta.storage_path)
+    if storage_path.exists():
+        storage_path.unlink()
 
-    ratio = text_pages / max(1, len(pages))
-    return ratio < min_ratio
-
-
-def _has_mistral_key() -> bool:
-    # Mistral OCR adapter reads the env var directly; keep behavior consistent here.
-    return bool((os.getenv("MISTRAL_API_KEY") or "").strip())
+    registry.delete(meta.doc_id)
 
 
 @router.post(
@@ -99,156 +220,160 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
     if not source_url:
         raise HTTPException(status_code=400, detail="source_url is required.")
 
+    state = IngestState(stage="save_upload")
+    vector_store: PineconeVectorStore | None = None
+
     try:
         stored = save_upload(file, STORAGE_DIR)
     except Exception as exc:
         logger.exception("upload_failed stage=save_upload")
         raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}") from exc
 
-    try:
-        extracted = extract_pages(str(stored.path))
-    except Exception as exc:
-        logger.exception("upload_failed stage=extract_pages doc_id=%s", stored.doc_id)
-        raise HTTPException(status_code=400, detail=f"Failed to read PDF text: {exc}") from exc
-
-    ocr_mode = str(os.getenv("KB_OCR_MODE", "auto") or "auto").strip().lower()
-    if ocr_mode not in {"auto", "always", "never"}:
-        ocr_mode = "auto"
-
-    pages = extracted
-    use_ocr = bool(ocr_mode == "always" or (ocr_mode == "auto" and _should_ocr(extracted)))
-    if use_ocr:
-        if not _has_mistral_key():
-            # In auto mode, prefer a soft-fail: accept whatever text extraction produced.
-            # In always mode, the caller explicitly demanded OCR, so hard-fail.
-            if ocr_mode == "always":
-                raise HTTPException(
-                    status_code=502,
-                    detail="KB_OCR_MODE=always but MISTRAL_API_KEY is not set",
-                )
-            logger.warning(
-                "ocr_skipped doc_id=%s reason=missing_mistral_api_key",
-                stored.doc_id,
-            )
-            use_ocr = False
-        else:
-            try:
-                pages = ocr_pdf_to_pages(pdf_path=stored.path, filename=stored.filename)
-            except MistralOcrError as exc:
-                logger.exception("upload_failed stage=ocr doc_id=%s", stored.doc_id)
-                raise HTTPException(status_code=502, detail=str(exc)) from exc
-            except Exception as exc:  # pragma: no cover
-                logger.exception("upload_failed stage=ocr doc_id=%s", stored.doc_id)
-                raise HTTPException(status_code=502, detail=f"Failed to OCR PDF: {exc}") from exc
-
-    logger.info(
-        "pdf_text_mode doc_id=%s mode=%s ocr=%s pages=%d",
-        stored.doc_id,
-        ocr_mode,
-        bool(use_ocr),
-        len(pages),
-    )
-
-    page_count = len(pages)
-    token_count = sum(estimate_tokens(p.text, settings.openai_embedding_model) for p in pages)
-    route = "tree" if page_count > settings.page_tree_threshold else "standard"
-    index_version = compute_index_version(settings=settings, route=route)
+    state.doc_id = stored.doc_id
+    state.storage_path = stored.path
+    state.storage_created = bool(getattr(stored, "created", False))
 
     existing = registry.get(stored.doc_id)
-    if existing and existing.index_version == index_version and existing.route == route:
-        if route != "tree" or (
-            _tree_path(stored.doc_id, index_version).exists()
-            and _headings_path(stored.doc_id, index_version).exists()
-        ):
-            return DocumentCreateResponse(
-                doc_id=existing.doc_id,
-                slug=existing.slug,
-                filename=existing.filename,
-                source_url=existing.source_url,
-                page_count=existing.page_count,
-                token_count=existing.token_count,
-                route=existing.route,
-                index_version=existing.index_version,
-                file_url=_file_url(existing.doc_id),
-            )
+    state.had_existing_doc = existing is not None
 
     try:
-        vector_store = get_vector_store()
-        if route == "tree":
-            indexed_count = build_tree_index(
-                doc_id=stored.doc_id,
-                slug=stored.slug,
-                filename=stored.filename,
-                source_url=source_url,
-                page_count=page_count,
-                token_count=token_count,
-                pages=pages,
-                settings=settings,
-                vector_store=vector_store,
-                tree_dir=TREE_DIR,
-                index_version=index_version,
-            )
-        else:
-            indexed_count = build_standard_index(
-                doc_id=stored.doc_id,
-                slug=stored.slug,
-                filename=stored.filename,
-                source_url=source_url,
-                page_count=page_count,
-                token_count=token_count,
-                pages=pages,
-                settings=settings,
-                vector_store=vector_store,
-                index_version=index_version,
-            )
-    except Exception as exc:
-        logger.exception("upload_failed stage=index doc_id=%s route=%s", stored.doc_id, route)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Indexing failed ({route}). Check OpenAI/Pinecone connectivity: {exc}",
-        ) from exc
+        state.stage = "ocr"
+        try:
+            pages = ocr_pdf_to_pages(pdf_path=stored.path, filename=stored.filename)
+        except MistralOcrError as exc:
+            logger.exception("upload_failed stage=ocr doc_id=%s", stored.doc_id)
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+        except Exception as exc:  # pragma: no cover
+            logger.exception("upload_failed stage=ocr doc_id=%s", stored.doc_id)
+            raise HTTPException(status_code=502, detail=f"Failed to OCR PDF: {exc}") from exc
 
-    try:
-        registry.save(
-            DocMeta(
-                doc_id=stored.doc_id,
-                slug=stored.slug,
-                filename=stored.filename,
-                source_url=source_url,
-                checksum=stored.checksum,
-                size_bytes=stored.size_bytes,
-                page_count=page_count,
-                token_count=token_count,
-                route=route,
-                storage_path=str(stored.path),
-                index_version=index_version,
-                created_at=now_utc_iso(),
-            )
+        logger.info(
+            "pdf_text_mode doc_id=%s mode=%s ocr=%s pages=%d",
+            stored.doc_id,
+            "mistral_always",
+            True,
+            len(pages),
         )
-    except Exception as exc:
-        logger.exception("upload_failed stage=registry_save doc_id=%s", stored.doc_id)
-        raise HTTPException(status_code=500, detail=f"Failed to save document metadata: {exc}") from exc
 
-    logger.info(
-        "upload_complete doc_id=%s route=%s pages=%d est_tokens=%d indexed=%d",
-        stored.doc_id,
-        route,
-        page_count,
-        token_count,
-        indexed_count,
-    )
+        page_count = len(pages)
+        token_count = sum(estimate_tokens(p.text, settings.openai_embedding_model) for p in pages)
+        route = "tree" if page_count > settings.page_tree_threshold else "standard"
+        index_version = compute_index_version(settings=settings, route=route)
+        state.route = route
+        state.index_version = index_version
 
-    return DocumentCreateResponse(
-        doc_id=stored.doc_id,
-        slug=stored.slug,
-        filename=stored.filename,
-        source_url=source_url,
-        page_count=page_count,
-        token_count=token_count,
-        route=route,
-        index_version=index_version,
-        file_url=_file_url(stored.doc_id),
-    )
+        state.target_tree_artifacts_existed = bool(
+            route == "tree"
+            and _tree_path(stored.doc_id, index_version).exists()
+            and _headings_path(stored.doc_id, index_version).exists()
+        )
+
+        if existing and existing.index_version == index_version and existing.route == route:
+            if route != "tree" or state.target_tree_artifacts_existed:
+                return DocumentCreateResponse(
+                    doc_id=existing.doc_id,
+                    slug=existing.slug,
+                    filename=existing.filename,
+                    source_url=existing.source_url,
+                    page_count=existing.page_count,
+                    token_count=existing.token_count,
+                    route=existing.route,
+                    index_version=existing.index_version,
+                    file_url=_file_url(existing.doc_id),
+                )
+
+        state.stage = "index"
+        try:
+            vector_store = get_vector_store()
+            if route == "tree":
+                indexed_count = build_tree_index(
+                    doc_id=stored.doc_id,
+                    slug=stored.slug,
+                    filename=stored.filename,
+                    source_url=source_url,
+                    page_count=page_count,
+                    token_count=token_count,
+                    pages=pages,
+                    settings=settings,
+                    vector_store=vector_store,
+                    tree_dir=TREE_DIR,
+                    index_version=index_version,
+                )
+            else:
+                indexed_count = build_standard_index(
+                    doc_id=stored.doc_id,
+                    slug=stored.slug,
+                    filename=stored.filename,
+                    source_url=source_url,
+                    page_count=page_count,
+                    token_count=token_count,
+                    pages=pages,
+                    settings=settings,
+                    vector_store=vector_store,
+                    index_version=index_version,
+                )
+        except Exception as exc:
+            logger.exception("upload_failed stage=index doc_id=%s route=%s", stored.doc_id, route)
+            raise HTTPException(
+                status_code=502,
+                detail=f"Indexing failed ({route}). Check OpenAI/Pinecone connectivity: {exc}",
+            ) from exc
+
+        state.stage = "registry_save"
+        try:
+            registry.save(
+                DocMeta(
+                    doc_id=stored.doc_id,
+                    slug=stored.slug,
+                    filename=stored.filename,
+                    source_url=source_url,
+                    checksum=stored.checksum,
+                    size_bytes=stored.size_bytes,
+                    page_count=page_count,
+                    token_count=token_count,
+                    route=route,
+                    storage_path=str(stored.path),
+                    index_version=index_version,
+                    created_at=now_utc_iso(),
+                )
+            )
+        except Exception as exc:
+            logger.exception("upload_failed stage=registry_save doc_id=%s", stored.doc_id)
+            raise HTTPException(status_code=500, detail=f"Failed to save document metadata: {exc}") from exc
+
+        state.registry_saved = True
+        state.stage = "complete"
+        logger.info(
+            "upload_complete doc_id=%s route=%s pages=%d est_tokens=%d indexed=%d",
+            stored.doc_id,
+            route,
+            page_count,
+            token_count,
+            indexed_count,
+        )
+
+        return DocumentCreateResponse(
+            doc_id=stored.doc_id,
+            slug=stored.slug,
+            filename=stored.filename,
+            source_url=source_url,
+            page_count=page_count,
+            token_count=token_count,
+            route=route,
+            index_version=index_version,
+            file_url=_file_url(stored.doc_id),
+        )
+    except HTTPException:
+        _cleanup_failed_ingest(state=state, vector_store=vector_store)
+        raise
+    except Exception as exc:  # pragma: no cover
+        logger.exception(
+            "upload_failed stage=%s doc_id=%s unexpected_error",
+            state.stage,
+            state.doc_id,
+        )
+        _cleanup_failed_ingest(state=state, vector_store=vector_store)
+        raise HTTPException(status_code=500, detail=f"Unexpected ingest failure: {exc}") from exc
 
 
 @router.get(
@@ -300,49 +425,21 @@ def delete_document(doc_id: str):
     if not meta:
         raise HTTPException(status_code=404, detail="Document not found.")
 
-    # Delete vectors for the doc namespace.
-    vector_store: PineconeVectorStore | None = None
     try:
         vector_store = get_vector_store()
-    except HTTPException:
-        vector_store = None
+    except HTTPException as exc:
+        logger.exception("delete_failed step=get_vector_store doc_id=%s", doc_id)
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={
+                "message": "Document delete aborted because vector cleanup could not start.",
+                "doc_id": doc_id,
+                "failed_step": "get_vector_store",
+                "cleanup_status": "local_state_preserved",
+                "error": exc.detail,
+            },
+        ) from exc
 
-    try:
-        if vector_store is not None:
-            vector_store.clear_namespace(doc_id)
-    except Exception:
-        pass
-
-    # Delete doc centroid in summary namespace.
-    try:
-        if vector_store is not None:
-            vector_store.delete_ids([doc_id], namespace=settings.doc_summary_namespace)
-    except Exception:
-        pass
-
-    # Delete tree artifacts if present.
-    if meta.route == "tree":
-        tree_path = _tree_path(doc_id, meta.index_version)
-        if tree_path.exists():
-            tree_path.unlink()
-        headings_path = _headings_path(doc_id, meta.index_version)
-        if headings_path.exists():
-            headings_path.unlink()
-        # Best-effort cleanup of empty dirs.
-        try:
-            parent = tree_path.parent
-            if parent.exists() and not any(parent.iterdir()):
-                parent.rmdir()
-            parent2 = parent.parent
-            if parent2.exists() and not any(parent2.iterdir()):
-                parent2.rmdir()
-        except Exception:
-            pass
-
-    # Delete stored PDF.
-    storage_path = Path(meta.storage_path)
-    if storage_path.exists():
-        storage_path.unlink()
-
-    registry.delete(doc_id)
+    _delete_document_vectors(doc_id=doc_id, vector_store=vector_store)
+    _delete_local_document_artifacts(meta)
     return {"ok": True, "doc_id": doc_id}

@@ -27,14 +27,34 @@ def _bool_env(value: str) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
+def _normalize_optional_str(value: str | None) -> str | None:
+    if value is None:
+        return None
+    value = str(value).strip()
+    return value or None
+
+
+def _normalize_app_env(value: str) -> str:
+    value = str(value or "development").strip().lower()
+    return value or "development"
+
+
+def _default_require_auth_for_env(app_env: str) -> bool:
+    return app_env not in {"development", "dev", "local", "test"}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str = _get_env("APP_ENV", "development")
+    kb_app_token: str | None = _get_env("KB_APP_TOKEN", default=None)
+    kb_admin_token: str | None = _get_env("KB_ADMIN_TOKEN", default=None)
+    kb_require_auth: bool = False
+    kb_require_auth_explicit: bool = False
 
     # OpenAI
     # Keep optional so the app can boot and answer `/api/health` even when secrets
     # are not yet configured in a deployment environment. Use `/api/health/deps`
-    # (and `deep=true`) to verify external dependencies.
+    # to verify whether required dependency config is present.
     openai_api_key: str | None = _get_env("OPENAI_API_KEY", default=None)
     openai_base_url: str | None = _get_env("OPENAI_BASE_URL", default=None)
     openai_timeout_seconds: float = _get_env("OPENAI_TIMEOUT_SECONDS", 90, float)
@@ -136,10 +156,49 @@ class Settings:
     sse_heartbeat_seconds: float = _get_env("SSE_HEARTBEAT_SECONDS", 15.0, float)
 
     # Versioning
-    index_schema_version: str = _get_env("INDEX_SCHEMA_VERSION", "v3")
+    index_schema_version: str = _get_env("INDEX_SCHEMA_VERSION", "v4")
+
+    def __post_init__(self) -> None:
+        app_env = _normalize_app_env(self.app_env)
+        raw_require_auth = os.getenv("KB_REQUIRE_AUTH")
+        explicit_require_auth = raw_require_auth is not None and raw_require_auth != ""
+        require_auth = (
+            _bool_env(raw_require_auth)
+            if explicit_require_auth
+            else _default_require_auth_for_env(app_env)
+        )
+
+        object.__setattr__(self, "app_env", app_env)
+        object.__setattr__(self, "kb_app_token", _normalize_optional_str(self.kb_app_token))
+        object.__setattr__(self, "kb_admin_token", _normalize_optional_str(self.kb_admin_token))
+        object.__setattr__(self, "kb_require_auth", require_auth)
+        object.__setattr__(self, "kb_require_auth_explicit", explicit_require_auth)
 
 
 settings = Settings()
+
+
+def validate_settings(s: Settings) -> None:
+    if not s.kb_require_auth:
+        return
+
+    missing: list[str] = []
+    if not s.kb_app_token:
+        missing.append("KB_APP_TOKEN")
+    if not s.kb_admin_token:
+        missing.append("KB_ADMIN_TOKEN")
+    if not missing:
+        return
+
+    if s.kb_require_auth_explicit:
+        reason = "KB_REQUIRE_AUTH=true"
+    else:
+        reason = f"APP_ENV={s.app_env} defaults auth to required outside development"
+
+    missing_list = ", ".join(missing)
+    raise RuntimeError(
+        f"Authentication is required ({reason}) but missing required env var(s): {missing_list}"
+    )
 
 
 def resolve_path(path_value: str) -> Path:

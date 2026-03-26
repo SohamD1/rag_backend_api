@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
+from uuid import uuid4
 
 
 @dataclass(frozen=True)
@@ -46,7 +48,14 @@ class DocRegistry:
             "index_version": meta.index_version,
             "created_at": meta.created_at,
         }
-        self._path(meta.doc_id).write_text(json.dumps(data, indent=2))
+        path = self._path(meta.doc_id)
+        tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(json.dumps(data, indent=2))
+            os.replace(tmp_path, path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()
 
     def get(self, doc_id: str) -> Optional[DocMeta]:
         path = self._path(doc_id)

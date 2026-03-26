@@ -7,6 +7,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.health import router as health_router
 from app.api.v1.chat import router as chat_v1_router
 from app.api.v1.documents import router as documents_v1_router
+from app.config import settings, validate_settings
 
 
 def _configure_logging() -> None:
@@ -22,6 +23,7 @@ def _configure_logging() -> None:
 
 
 _configure_logging()
+validate_settings(settings)
 
 app = FastAPI(title="RAG Backend API", version="1.0.0")
 

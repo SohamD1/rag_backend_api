@@ -12,17 +12,12 @@ from typing import Callable, Optional
 
 from fastapi import HTTPException, Request
 
+from app.config import settings
+
 # When the KB is called from friedmann-prod, it includes a stable advisor identity header.
 # We only trust this header when the request is authenticated with the app token.
 _ADVISOR_HEADER = "x-friedmann-user-id"
 _ADVISOR_ID_RE = re.compile(r"^[A-Za-z0-9:_-]{1,128}$")
-
-
-def _bool_env(name: str, default: bool) -> bool:
-    raw = os.getenv(name)
-    if raw is None or raw == "":
-        return bool(default)
-    return str(raw).strip().lower() in {"1", "true", "yes"}
 
 
 def _get_int_env(name: str, default: int) -> int:
@@ -37,7 +32,11 @@ def _get_int_env(name: str, default: int) -> int:
 
 def _client_ip(req: Request) -> str:
     # Only trust proxy headers when explicitly enabled.
-    if _bool_env("RAG_TRUST_X_FORWARDED_FOR", False):
+    if str(os.getenv("RAG_TRUST_X_FORWARDED_FOR") or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+    }:
         xff = (req.headers.get("x-forwarded-for") or "").split(",")[0].strip()
         if xff:
             return xff
@@ -58,13 +57,12 @@ def _bearer(req: Request) -> Optional[str]:
 
 
 def _expected_kb_app_token() -> str:
-    # Keep in sync with backend/app/api/security.py
-    return (os.getenv("KB_APP_TOKEN") or "").strip()
+    return settings.kb_app_token or ""
 
 
 def _is_trusted_app_request(req: Request) -> bool:
     # Only trust identity headers when auth is enabled and the bearer token matches.
-    if not _bool_env("KB_REQUIRE_AUTH", False):
+    if not settings.kb_require_auth:
         return False
     expected = _expected_kb_app_token()
     if not expected:
@@ -223,7 +221,6 @@ def admin_rate_limit(req: Request) -> None:
             detail="Rate limit exceeded",
             headers={"Retry-After": str(retry_after)},
         )
-
 
 def make_rate_limit_dep(fn: Callable[[Request], None]) -> Callable[[Request], None]:
     # Convenience for `Depends(...)` call sites.

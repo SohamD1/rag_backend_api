@@ -2,7 +2,6 @@ fastapi==0.115.7
 uvicorn[standard]==0.30.6
 python-multipart==0.0.9
 python-dotenv==1.0.1
-pypdf==4.3.1
 cryptography>=3.1
 openai==1.57.4
 tiktoken==0.7.0
