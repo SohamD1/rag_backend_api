@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Optional, Tuple
 
 from app.config import Settings
 from app.core.retrieval import RetrievalItem
@@ -8,16 +8,21 @@ from app.core.tokens import estimate_tokens, truncate_to_tokens
 from app.core.vector_math import cosine_similarity
 
 
-def _dedupe_by_text(items: List[RetrievalItem]) -> List[RetrievalItem]:
-    seen: set[str] = set()
+def _dedupe_within_doc(items: List[RetrievalItem]) -> List[RetrievalItem]:
+    """
+    Keep exact duplicates out of a single document, but preserve the same
+    passage when it appears in different docs as corroborating evidence.
+    """
+    seen: set[tuple[str, str]] = set()
     out: List[RetrievalItem] = []
     for item in items:
         key = " ".join((item.text or "").split())
         if not key:
             continue
-        if key in seen:
+        dedupe_key = (item.doc_id, key)
+        if dedupe_key in seen:
             continue
-        seen.add(key)
+        seen.add(dedupe_key)
         out.append(item)
     return out
 
@@ -78,7 +83,7 @@ def select_context(
     Returns (selected_items, context_items_for_generation).
     """
     items = [i for i in (items or []) if i.text]
-    items = _dedupe_by_text(items)
+    items = _dedupe_within_doc(items)
     if getattr(settings, "context_use_mmr", False):
         items = _mmr_reorder(items, lambda_mult=float(getattr(settings, "context_mmr_lambda", 0.7)))
 
@@ -99,8 +104,8 @@ def select_context(
                 text = item.text
 
         cost = estimate_tokens(text, settings.openai_generation_model)
-        if selected and used + cost > budget:
-            break
+        if used + cost > budget:
+            continue
         doc_label = item.doc_id
         if doc_labels and item.doc_id in doc_labels:
             doc_label = doc_labels[item.doc_id]

@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Dict, Optional
+from uuid import uuid4
 
 
 def make_cache_key(payload: Dict[str, Any]) -> str:
@@ -42,5 +43,10 @@ class JsonCache:
 
     def set(self, key: str, value: Any) -> None:
         path = self._path(key)
-        path.write_text(json.dumps({"key": key, "value": value}, indent=2))
-
+        tmp_path = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+        try:
+            tmp_path.write_text(json.dumps({"key": key, "value": value}, indent=2))
+            tmp_path.replace(path)
+        finally:
+            if tmp_path.exists():
+                tmp_path.unlink()

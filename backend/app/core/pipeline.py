@@ -154,6 +154,19 @@ def _build_chunk_payload(items: List[RetrievalItem]) -> List[Dict[str, Any]]:
     return chunks
 
 
+def _mark_retrieval_degraded(
+    *,
+    debug_info: Optional[Dict[str, Any]],
+    stage: str,
+    details: Dict[str, Any],
+) -> None:
+    if debug_info is None:
+        return
+    degraded = debug_info.setdefault("retrieval_degraded", {"stages": []})
+    stages = degraded.setdefault("stages", [])
+    stages.append({"stage": stage, **details})
+
+
 def select_docs_with_rewrite_retry(
     *,
     query: str,
@@ -251,9 +264,16 @@ def run_chat(
             "query": normalized,
             "doc_versions": doc_versions,
             "generation_model": settings.openai_generation_model,
+            "doc_summary_top_k": settings.doc_summary_top_k,
+            "doc_strong_min_score": settings.doc_strong_min_score,
+            "doc_strong_min_ratio": settings.doc_strong_min_ratio,
             "max_context_tokens": settings.max_context_tokens,
+            "context_max_item_tokens": settings.context_max_item_tokens,
+            "context_use_mmr": settings.context_use_mmr,
+            "context_mmr_lambda": settings.context_mmr_lambda,
             "rerank_top_k": settings.rerank_top_k,
             "rerank_candidate_k": settings.rerank_candidate_k,
+            "low_confidence_threshold": settings.low_confidence_threshold,
             "rewrite_model": settings.openai_rewrite_model,
             "rewrite_attempts": settings.doc_rewrite_max_attempts,
             "citation_mode": "doc_consolidated_v1",
@@ -301,12 +321,13 @@ def run_chat(
         retrieval_embedding_local: List[float],
         strong_doc_match: bool,
         stage_prefix: str = "",
-    ) -> List[RetrievalItem]:
+    ) -> tuple[List[RetrievalItem], bool]:
         stage_retrieve = f"{stage_prefix}retrieve"
         stage_rerank_fetch = f"{stage_prefix}rerank_fetch"
         stage_rerank = f"{stage_prefix}rerank"
         stage_retrieve_cache = f"{stage_prefix}retrieve_cache"
         debug_retrieval_key = "retrieval" if not stage_prefix else f"{stage_prefix}retrieval".rstrip("_")
+        degraded = False
 
         selected_versions = sorted(
             f"{m.doc_id}:{m.index_version}:{m.route}" for m in selected_metas_local
@@ -322,6 +343,8 @@ def run_chat(
                 "tree_node_selection_mode": getattr(settings, "tree_node_selection_mode", "vector_only"),
                 "tree_node_selection_candidate_k": getattr(settings, "tree_node_selection_candidate_k", 24),
                 "tree_node_selection_top_n": getattr(settings, "tree_node_selection_top_n", 6),
+                "doc_strong_min_score": settings.doc_strong_min_score,
+                "doc_strong_min_ratio": settings.doc_strong_min_ratio,
                 "tree_node_selection_model": getattr(settings, "openai_tree_search_model", None),
             }
         )
@@ -341,6 +364,7 @@ def run_chat(
             t_retrieve = perf_counter()
             _stage_start(on_event, stage_retrieve)
             retrieval_debug_by_doc: Dict[str, Dict[str, Any]] = {}
+            failed_doc_ids: List[str] = []
 
             def _retrieve_one(meta: DocMeta):
                 local_debug: Dict[str, Any] = {}
@@ -368,29 +392,44 @@ def run_chat(
                 return meta.doc_id, items, local_debug
 
             with ThreadPoolExecutor(max_workers=min(6, max(1, len(selected_metas_local)))) as executor:
-                futures = [executor.submit(_retrieve_one, m) for m in selected_metas_local]
+                futures = {
+                    executor.submit(_retrieve_one, m): m.doc_id for m in selected_metas_local
+                }
                 for future in as_completed(futures):
+                    doc_id_hint = futures[future]
                     try:
                         doc_id, items, local_debug = future.result()
                     except Exception:
+                        degraded = True
+                        failed_doc_ids.append(doc_id_hint)
                         continue
                     results_local.extend(items or [])
                     if debug_info is not None and local_debug:
                         retrieval_debug_by_doc[doc_id] = local_debug
             _stage_end(on_event, stage_retrieve, int((perf_counter() - t_retrieve) * 1000))
-            retrieval_cache.set(
-                retrieval_key,
-                {"items": [retrieval_item_to_dict(item) for item in results_local]},
-            )
+            if failed_doc_ids:
+                _mark_retrieval_degraded(
+                    debug_info=debug_info,
+                    stage=stage_retrieve,
+                    details={
+                        "failed_doc_ids": failed_doc_ids,
+                    },
+                )
+            if not degraded:
+                retrieval_cache.set(
+                    retrieval_key,
+                    {"items": [retrieval_item_to_dict(item) for item in results_local]},
+                )
             if debug_info is not None:
                 debug_info["stage_order"].append(stage_retrieve)
                 debug_info.setdefault(debug_retrieval_key, {})["count"] = len(results_local)
+                debug_info.setdefault(debug_retrieval_key, {})["degraded"] = degraded
                 if retrieval_debug_by_doc:
                     key = "retrieval_by_doc" if not stage_prefix else f"{stage_prefix}retrieval_by_doc".rstrip("_")
                     debug_info[key] = retrieval_debug_by_doc
 
         if not results_local:
-            return []
+            return [], degraded
 
         ordered_for_fetch = sorted(results_local, key=lambda x: x.score, reverse=True)
         if _should_skip_rerank(
@@ -412,7 +451,7 @@ def run_chat(
                 debug_info["stage_order"].append(f"{stage_rerank}_skip")
                 debug_info["top_score"] = reranked_local[0].score if reranked_local else -1.0
                 debug_info["low_confidence_threshold"] = settings.low_confidence_threshold
-            return reranked_local
+            return reranked_local, degraded
 
         # Attach stored vector values for rerank candidates (bounded, grouped by namespace/doc_id).
         t_fetch = perf_counter()
@@ -424,21 +463,35 @@ def run_chat(
             if namespace and item.source_id:
                 ids_by_namespace.setdefault(namespace, []).append(item.source_id)
         embedding_by_key: Dict[tuple[str, str], List[float]] = {}
+        failed_fetch_namespaces: List[str] = []
         if ids_by_namespace:
-            with ThreadPoolExecutor(max_workers=min(6, len(ids_by_namespace))) as executor:
-                futures = {
-                    executor.submit(vector_store.fetch, ids=ids, namespace=namespace): namespace
-                    for namespace, ids in ids_by_namespace.items()
-                }
-                for future in as_completed(futures):
-                    namespace = futures[future]
-                    try:
-                        id_to_values = future.result() or {}
-                    except Exception:
-                        continue
-                    for source_id, emb in id_to_values.items():
-                        if emb:
-                            embedding_by_key[(namespace, source_id)] = emb
+            fetch_fn = getattr(vector_store, "fetch", None)
+            if not callable(fetch_fn):
+                degraded = True
+                failed_fetch_namespaces.extend(sorted(ids_by_namespace))
+            else:
+                with ThreadPoolExecutor(max_workers=min(6, len(ids_by_namespace))) as executor:
+                    futures = {
+                        executor.submit(fetch_fn, ids=ids, namespace=namespace): namespace
+                        for namespace, ids in ids_by_namespace.items()
+                    }
+                    for future in as_completed(futures):
+                        namespace = futures[future]
+                        try:
+                            id_to_values = future.result() or {}
+                        except Exception:
+                            degraded = True
+                            failed_fetch_namespaces.append(namespace)
+                            continue
+                        for source_id, emb in id_to_values.items():
+                            if emb:
+                                embedding_by_key[(namespace, source_id)] = emb
+        if failed_fetch_namespaces:
+            _mark_retrieval_degraded(
+                debug_info=debug_info,
+                stage=stage_rerank_fetch,
+                details={"failed_namespaces": failed_fetch_namespaces},
+            )
 
         if embedding_by_key:
             next_results: List[RetrievalItem] = []
@@ -483,9 +536,9 @@ def run_chat(
             debug_info["stage_order"].append(stage_rerank)
             debug_info["top_score"] = reranked_local[0].score if reranked_local else -1.0
             debug_info["low_confidence_threshold"] = settings.low_confidence_threshold
-        return reranked_local
+        return reranked_local, degraded
 
-    reranked = _retrieve_and_rerank(
+    reranked, retrieval_degraded = _retrieve_and_rerank(
         selected_metas_local=selected_metas,
         retrieval_query_local=retrieval_query,
         retrieval_embedding_local=retrieval_embedding,
@@ -520,8 +573,9 @@ def run_chat(
 
         retry_selected_metas = [meta_by_id[d] for d in retry_doc_ids if d in meta_by_id]
         retry_reranked: List[RetrievalItem] = []
+        retry_degraded = False
         if retry_selected_metas:
-            retry_reranked = _retrieve_and_rerank(
+            retry_reranked, retry_degraded = _retrieve_and_rerank(
                 selected_metas_local=retry_selected_metas,
                 retrieval_query_local=retry_retrieval_query,
                 retrieval_embedding_local=retry_retrieval_embedding,
@@ -536,6 +590,7 @@ def run_chat(
             selected_metas = retry_selected_metas
             reranked = retry_reranked
             strong = retry_strong
+            retrieval_degraded = retry_degraded
         if debug_info is not None:
             debug_info["rewrite_retry"] = {
                 "query_used": rewritten_query,
@@ -543,6 +598,7 @@ def run_chat(
                 "base_top_score": base_top,
                 "retry_top_score": retry_top,
                 "applied": used_rewrite_retry,
+                "retry_degraded": retry_degraded,
             }
 
     generation_enabled = bool(getattr(settings, "rag_generate_answers_enabled", True))
@@ -563,7 +619,8 @@ def run_chat(
             "used_context_count": 0,
             "debug": debug_info,
         }
-        response_cache.set(response_key, payload)
+        if not retrieval_degraded:
+            response_cache.set(response_key, payload)
         return payload
 
     # Context budget selection for either retrieval-only or grounded generation.
@@ -602,7 +659,8 @@ def run_chat(
             "used_context_count": len(selected),
             "debug": debug_info,
         }
-        response_cache.set(response_key, payload)
+        if not retrieval_degraded:
+            response_cache.set(response_key, payload)
         logger.info(
             "chat_complete generation_enabled=%s selected_docs=%d used_context=%d elapsed_ms=%d",
             generation_enabled,
@@ -631,7 +689,8 @@ def run_chat(
         "used_context_count": len(selected),
         "debug": debug_info,
     }
-    response_cache.set(response_key, payload)
+    if not retrieval_degraded:
+        response_cache.set(response_key, payload)
     logger.info(
         "chat_complete strong_doc_match=%s selected_docs=%d used_context=%d elapsed_ms=%d",
         strong,
