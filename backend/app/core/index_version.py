@@ -20,6 +20,7 @@ def compute_index_version(*, settings: Settings, route: str) -> str:
         "embedding_model": settings.openai_embedding_model,
         "embedding_dimensions": settings.openai_embedding_dimensions,
         "tree_model": settings.openai_tree_model,
+        "tree_reasoning_effort": getattr(settings, "openai_tree_reasoning_effort", "high"),
         "chunking": {
             "logic_version": settings.chunking_logic_version,
             "target": settings.chunk_target_tokens,

@@ -57,6 +57,7 @@ def _llm_chat(settings: Settings, prompt: str, *, max_tokens: int = 4096) -> str
         settings,
         model=settings.openai_tree_model,
         messages=[{"role": "user", "content": prompt}],
+        reasoning_effort=getattr(settings, "openai_tree_reasoning_effort", "high"),
         temperature=0.0,
         max_tokens=max_tokens,
     )
@@ -78,6 +79,7 @@ def _llm_json(
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
+        reasoning_effort=getattr(settings, "openai_tree_reasoning_effort", "high"),
         temperature=0.0,
         max_tokens=max_tokens,
     )
@@ -818,6 +820,7 @@ def _summarize_heading_nodes(
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
                 ],
+                reasoning_effort=getattr(settings, "openai_tree_reasoning_effort", "high"),
                 temperature=0.0,
                 max_tokens=256,
             )
@@ -969,6 +972,25 @@ def _truncate_tokens(text: str, *, model: str, max_tokens: int) -> str:
     if len(toks) <= max_tokens:
         return text.strip()
     return enc.decode(toks[:max_tokens]).strip()
+
+
+def _normalize_heading_match_text(text: str) -> str:
+    text = " ".join((text or "").replace("\r", " ").replace("\n", " ").split()).lower()
+    if not text:
+        return ""
+    # Strip common numbered heading prefixes so "1.2 Title" can match "Title".
+    text = re.sub(r"^\s*(?:\(?[ivxlcdm]+\)?|\d+(?:\.\d+)*)(?:[\)\].:-]|\s)+", "", text)
+    text = re.sub(r"^\s*(?:chapter|section|part)\s+\d+(?:\.\d+)*\s*[:.\-]?\s*", "", text)
+    text = re.sub(r"[^a-z0-9\s]+", " ", text)
+    return " ".join(text.split())
+
+
+def _paragraph_starts_heading(title: str, paragraph: str) -> bool:
+    title_norm = _normalize_heading_match_text(title)
+    para_norm = _normalize_heading_match_text(paragraph)
+    if not title_norm or not para_norm:
+        return False
+    return para_norm == title_norm or para_norm.startswith(f"{title_norm} ")
 
 
 def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[str, TreeNode]:
@@ -1126,6 +1148,7 @@ def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[s
         heading_nodes,
         key=lambda x: (nodes[x[0]].page_start, x[1], x[0]),
     )
+    heading_order_index = {nid: idx for idx, (nid, _depth) in enumerate(heading_nodes)}
 
     def section_ancestor(nid: str) -> str:
         cur = nodes.get(nid)
@@ -1138,6 +1161,19 @@ def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[s
     section_id_by_heading: Dict[str, str] = {
         nid: section_ancestor(nid) for nid, _ in heading_nodes
     }
+
+    page_heading_candidates: Dict[int, List[str]] = {}
+    for nid, _depth in heading_nodes:
+        page_num = nodes[nid].page_start
+        page_heading_candidates.setdefault(page_num, []).append(nid)
+    for page_num, candidates in page_heading_candidates.items():
+        candidates.sort(
+            key=lambda nid: (
+                -_depth_for_level(nodes[nid].level),
+                heading_order_index.get(nid, 0),
+                nid,
+            )
+        )
 
     deepest_by_page: Dict[int, str] = {}
     for page_num in range(1, last_page + 1):
@@ -1154,8 +1190,9 @@ def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[s
     # Create paragraph leaves.
     para_counters: Dict[int, int] = {}
     for page in pages:
-        parent_heading = deepest_by_page.get(page.page_num, root_id)
-        section_id = section_id_by_heading.get(parent_heading, root_id)
+        active_heading = deepest_by_page.get(page.page_num, root_id)
+        section_id = section_id_by_heading.get(active_heading, root_id)
+        candidates = page_heading_candidates.get(page.page_num, [])
 
         normalized = (page.text or "").replace("\r\n", "\n").replace("\r", "\n")
         normalized = re.sub(r"\n{3,}", "\n\n", normalized)
@@ -1164,6 +1201,12 @@ def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[s
             continue
 
         for para in paragraphs:
+            for candidate in candidates:
+                if _paragraph_starts_heading(nodes[candidate].title, para):
+                    active_heading = candidate
+                    section_id = section_id_by_heading.get(active_heading, root_id)
+                    break
+
             parts = [para]
             if estimate_tokens(para, settings.openai_embedding_model) > LEAF_MAX_TOKENS:
                 # Split oversized paragraphs by tokens with overlap.
@@ -1187,7 +1230,7 @@ def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[s
                 leaf = TreeNode(
                     node_id=leaf_id,
                     doc_id=doc_id,
-                    parent_id=parent_heading,
+                    parent_id=active_heading,
                     child_ids=[],
                     level="paragraph",
                     title="",
@@ -1196,7 +1239,7 @@ def build_tree(doc_id: str, pages: List[PageText], settings: Settings) -> Dict[s
                     page_end=page.page_num,
                 )
                 nodes[leaf_id] = leaf
-                nodes[parent_heading].child_ids.append(leaf_id)
+                nodes[active_heading].child_ids.append(leaf_id)
 
                 # Store section_id on the node itself for later metadata usage (not part of TreeNode schema).
                 # We encode it in the node_id format via indexing metadata instead.
