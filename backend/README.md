@@ -41,12 +41,14 @@ python -m uvicorn app.main:app --reload --port 8000
 ## API
 - `GET /api/health` (liveness; always returns `{"status":"ok"}` if the app is running)
 - `GET /api/health/deps` (readiness/config; checks whether required env vars are present)
-- `POST /api/v1/documents` (multipart/form-data: `file`)
+- `POST /api/v1/documents` (multipart/form-data: `file`, `source_url`)
 - `GET /api/v1/documents`
-- `GET /api/v1/documents/{doc_id}/file`
 - `DELETE /api/v1/documents/{doc_id}`
 - `POST /api/v1/chat` (JSON: `{ "query": "...", "debug": false }`)
 - `POST /api/v1/chat/stream` (SSE)
 
 When retrieval-only mode is enabled (`RAG_GENERATE_ANSWERS_ENABLED=false`), chat responses
 include a `chunks` array with selected chunk text/metadata and skip final answer generation.
+
+Uploaded PDFs are processed transiently during ingest. The backend persists document metadata,
+tree artifacts, and vectors, but does not retain the original PDF for later download.

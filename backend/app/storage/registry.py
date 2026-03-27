@@ -20,7 +20,7 @@ class DocMeta:
     page_count: int
     token_count: int
     route: str
-    storage_path: str
+    storage_path: str | None
     index_version: str
     created_at: str
 
@@ -71,6 +71,7 @@ class DocRegistry:
         data.setdefault("checksum", "")
         data.setdefault("slug", data.get("doc_id", "document"))
         data.setdefault("source_url", "")
+        data.setdefault("storage_path", None)
         return DocMeta(**data)
 
     def list(self) -> List[DocMeta]:
@@ -88,6 +89,7 @@ class DocRegistry:
             data.setdefault("checksum", "")
             data.setdefault("slug", data.get("doc_id", "document"))
             data.setdefault("source_url", "")
+            data.setdefault("storage_path", None)
             try:
                 metas.append(DocMeta(**data))
             except Exception:

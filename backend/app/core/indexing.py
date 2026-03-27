@@ -14,10 +14,6 @@ from app.core.vector_namespace import vector_namespace
 from app.services.tree_index import TreeNode, build_tree, save_headings, save_tree, trace_path
 
 
-def _file_url(doc_id: str) -> str:
-    return f"/api/v1/documents/{doc_id}/file"
-
-
 @dataclass(frozen=True)
 class IndexBuildResult:
     indexed_count: int
@@ -52,7 +48,6 @@ def build_standard_index(
 
     centroid = compute_centroid(embeddings)
 
-    file_url = _file_url(doc_id)
     namespace = vector_namespace(doc_id, index_version)
     items = []
     for chunk, emb in zip(chunks, embeddings):
@@ -64,7 +59,6 @@ def build_standard_index(
                     "doc_id": doc_id,
                     "slug": slug,
                     "filename": filename,
-                    "file_url": file_url,
                     "source_url": source_url,
                     "chunk_id": chunk.chunk_id,
                     "page_start": chunk.page_start,
@@ -100,7 +94,6 @@ def build_tree_index(
     nodes = build_tree(doc_id, pages, settings)
     save_tree(doc_id, nodes, tree_dir, index_version=index_version)
     save_headings(doc_id, nodes, tree_dir, index_version=index_version)
-    file_url = _file_url(doc_id)
     namespace = vector_namespace(doc_id, index_version)
 
     def breadcrumb_for(node_id: str) -> str:
@@ -135,7 +128,6 @@ def build_tree_index(
                 "doc_id": node.doc_id,
                 "slug": slug,
                 "filename": filename,
-                "file_url": file_url,
                 "source_url": source_url,
                 "node_id": node.node_id,
                 "parent_id": node.parent_id,

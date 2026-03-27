@@ -58,7 +58,6 @@ def upsert_doc_centroid(
         "doc_id": doc_id,
         "slug": slug,
         "filename": filename,
-        "file_url": f"/api/v1/documents/{doc_id}/file",
         "source_url": source_url,
         "route": route,
         "page_count": page_count,

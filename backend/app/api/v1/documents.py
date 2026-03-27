@@ -4,7 +4,6 @@ from pathlib import Path
 from typing import List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse
 
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.api.deps import get_vector_store
@@ -41,7 +40,7 @@ registry = DocRegistry(DOCS_DIR)
 class IngestState:
     doc_id: str | None = None
     storage_path: Path | None = None
-    storage_created: bool = False
+    temp_upload_created: bool = False
     had_existing_doc: bool = False
     previous_meta: DocMeta | None = None
     previous_doc_summary: List[float] | None = None
@@ -52,10 +51,6 @@ class IngestState:
     registry_saved: bool = False
     doc_summary_saved: bool = False
     stage: str = "init"
-
-
-def _file_url(doc_id: str) -> str:
-    return f"/api/v1/documents/{doc_id}/file"
 
 
 def _tree_path(doc_id: str, index_version: str) -> Path:
@@ -186,7 +181,7 @@ def _cleanup_failed_ingest(
             state.index_version,
         )
 
-    if state.storage_created and state.storage_path is not None:
+    if state.temp_upload_created and state.storage_path is not None:
         try:
             if state.storage_path.exists():
                 state.storage_path.unlink()
@@ -300,10 +295,6 @@ def _delete_local_document_artifacts(meta: DocMeta) -> None:
             if version_dir.is_dir():
                 _delete_tree_artifacts(meta.doc_id, version_dir.name)
 
-    storage_path = Path(meta.storage_path)
-    if storage_path.exists():
-        storage_path.unlink()
-
     registry.delete(meta.doc_id)
 
 
@@ -330,47 +321,45 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
 
     state.doc_id = stored.doc_id
     state.storage_path = stored.path
-    state.storage_created = bool(getattr(stored, "created", False))
+    state.temp_upload_created = bool(getattr(stored, "created", False))
 
     existing = registry.get(stored.doc_id)
     state.had_existing_doc = existing is not None
     state.previous_meta = existing
 
-    if existing is not None:
-        current_existing_route = (
-            "tree" if existing.page_count > settings.page_tree_threshold else "standard"
-        )
-        current_existing_index_version = compute_index_version(
-            settings=settings, route=current_existing_route
-        )
-        existing_tree_ready = bool(
-            current_existing_route != "tree"
-            or (
-                _tree_path(existing.doc_id, current_existing_index_version).exists()
-                and _headings_path(existing.doc_id, current_existing_index_version).exists()
-            )
-        )
-        existing_storage_ready = Path(existing.storage_path).exists()
-        if (
-            source_url == existing.source_url
-            and existing.route == current_existing_route
-            and existing.index_version == current_existing_index_version
-            and existing_storage_ready
-            and existing_tree_ready
-        ):
-            return DocumentCreateResponse(
-                doc_id=existing.doc_id,
-                slug=existing.slug,
-                filename=existing.filename,
-                source_url=existing.source_url,
-                page_count=existing.page_count,
-                token_count=existing.token_count,
-                route=existing.route,
-                index_version=existing.index_version,
-                file_url=_file_url(existing.doc_id),
-            )
-
     try:
+        if existing is not None:
+            current_existing_route = (
+                "tree" if existing.page_count > settings.page_tree_threshold else "standard"
+            )
+            current_existing_index_version = compute_index_version(
+                settings=settings, route=current_existing_route
+            )
+            existing_tree_ready = bool(
+                current_existing_route != "tree"
+                or (
+                    _tree_path(existing.doc_id, current_existing_index_version).exists()
+                    and _headings_path(existing.doc_id, current_existing_index_version).exists()
+                )
+            )
+            if (
+                source_url == existing.source_url
+                and existing.route == current_existing_route
+                and existing.index_version == current_existing_index_version
+                and existing_tree_ready
+            ):
+                return DocumentCreateResponse(
+                    doc_id=existing.doc_id,
+                    slug=existing.slug,
+                    filename=existing.filename,
+                    source_url=existing.source_url,
+                    page_count=existing.page_count,
+                    token_count=existing.token_count,
+                    route=existing.route,
+                    index_version=existing.index_version,
+                    file_url=None,
+                )
+
         state.stage = "ocr"
         try:
             pages = ocr_pdf_to_pages(pdf_path=stored.path, filename=stored.filename)
@@ -403,7 +392,12 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
             and _headings_path(stored.doc_id, index_version).exists()
         )
 
-        if existing and existing.index_version == index_version and existing.route == route:
+        if (
+            existing
+            and source_url == existing.source_url
+            and existing.index_version == index_version
+            and existing.route == route
+        ):
             if route != "tree" or state.target_tree_artifacts_existed:
                 return DocumentCreateResponse(
                     doc_id=existing.doc_id,
@@ -414,7 +408,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
                     token_count=existing.token_count,
                     route=existing.route,
                     index_version=existing.index_version,
-                    file_url=_file_url(existing.doc_id),
+                    file_url=None,
                 )
 
         state.stage = "index"
@@ -478,7 +472,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
                     page_count=page_count,
                     token_count=token_count,
                     route=route,
-                    storage_path=str(stored.path),
+                    storage_path=None,
                     index_version=index_version,
                     created_at=now_utc_iso(),
                 )
@@ -533,7 +527,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
             token_count=token_count,
             route=route,
             index_version=index_version,
-            file_url=_file_url(stored.doc_id),
+            file_url=None,
         )
     except HTTPException:
         _cleanup_failed_ingest(state=state, vector_store=vector_store)
@@ -546,6 +540,17 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
         )
         _cleanup_failed_ingest(state=state, vector_store=vector_store)
         raise HTTPException(status_code=500, detail=f"Unexpected ingest failure: {exc}") from exc
+    finally:
+        if state.temp_upload_created and state.storage_path is not None:
+            try:
+                if state.storage_path.exists():
+                    state.storage_path.unlink()
+            except Exception:
+                logger.exception(
+                    "upload_failed stage=temp_cleanup doc_id=%s path=%s",
+                    state.doc_id,
+                    state.storage_path,
+                )
 
 
 @router.get(
@@ -565,27 +570,12 @@ def list_documents():
             token_count=m.token_count,
             route=m.route,
             index_version=m.index_version,
-            file_url=_file_url(m.doc_id),
+            file_url=None,
         )
         for m in metas
     ]
     docs = sorted(docs, key=lambda d: d.filename.lower())
     return DocumentListResponse(docs=docs)
-
-
-@router.get(
-    "/documents/{doc_id}/file",
-    name="get_document_file",
-    dependencies=[KBAdminAuthDep, Depends(make_rate_limit_dep(admin_rate_limit))],
-)
-def get_document_file(doc_id: str):
-    meta = registry.get(doc_id)
-    if not meta:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    path = Path(meta.storage_path)
-    if not path.exists():
-        raise HTTPException(status_code=404, detail="File missing from storage.")
-    return FileResponse(path, media_type="application/pdf", filename=meta.filename)
 
 
 @router.delete(
@@ -611,11 +601,10 @@ def delete_document(doc_id: str):
                 "error": exc.detail,
             },
         ) from exc
-
-        _delete_document_vectors(
-            doc_id=doc_id,
-            index_version=meta.index_version,
-            vector_store=vector_store,
-        )
+    _delete_document_vectors(
+        doc_id=doc_id,
+        index_version=meta.index_version,
+        vector_store=vector_store,
+    )
     _delete_local_document_artifacts(meta)
     return {"ok": True, "doc_id": doc_id}

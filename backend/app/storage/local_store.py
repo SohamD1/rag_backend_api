@@ -27,6 +27,10 @@ def ensure_dir(path: Path) -> None:
 
 
 def save_upload(upload: UploadFile, storage_dir: Path) -> StoredFile:
+    """
+    Save the upload to a temporary local path for OCR/indexing.
+    The caller is responsible for deleting the file after ingest completes.
+    """
     ensure_dir(storage_dir)
 
     suffix = Path(upload.filename or "document.pdf").suffix or ".pdf"
@@ -47,21 +51,15 @@ def save_upload(upload: UploadFile, storage_dir: Path) -> StoredFile:
 
     checksum = hasher.hexdigest()
     doc_id = f"{slug}__{checksum[:8]}"
-    path = storage_dir / f"{doc_id}{suffix}"
-    created = not path.exists()
-    if path.exists():
-        tmp_path.unlink(missing_ok=True)
-    else:
-        tmp_path.replace(path)
 
     return StoredFile(
         doc_id=doc_id,
         slug=slug,
-        path=path,
+        path=tmp_path,
         filename=upload.filename or f"{doc_id}{suffix}",
         checksum=checksum,
         size_bytes=size_bytes,
-        created=created,
+        created=True,
     )
 
 

@@ -12,7 +12,7 @@ class DocumentCreateResponse(BaseModel):
     token_count: int
     route: str
     index_version: str
-    file_url: str
+    file_url: Optional[str] = None
 
 
 class DocumentInfo(BaseModel):
@@ -24,7 +24,7 @@ class DocumentInfo(BaseModel):
     token_count: int
     route: str
     index_version: str
-    file_url: str
+    file_url: Optional[str] = None
 
 
 class DocumentListResponse(BaseModel):

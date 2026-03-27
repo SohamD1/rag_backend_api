@@ -81,7 +81,7 @@ def _stored_file(tmp_path: Path, doc_id: str, slug: str = "doc") -> StoredFile:
     )
 
 
-def _meta(*, doc_id: str, storage_path: Path, source_url: str, page_count: int = 1, route: str = "standard", index_version: str | None = None) -> DocMeta:
+def _meta(*, doc_id: str, storage_path: Path | None, source_url: str, page_count: int = 1, route: str = "standard", index_version: str | None = None) -> DocMeta:
     version = index_version or compute_index_version(settings=settings, route=route)
     return DocMeta(
         doc_id=doc_id,
@@ -93,7 +93,7 @@ def _meta(*, doc_id: str, storage_path: Path, source_url: str, page_count: int =
         page_count=page_count,
         token_count=42,
         route=route,
-        storage_path=str(storage_path),
+        storage_path=str(storage_path) if storage_path is not None else None,
         index_version=version,
         created_at="2026-03-26T00:00:00+00:00",
     )
@@ -127,6 +127,7 @@ def test_exact_reupload_skips_ocr_when_unchanged(client, monkeypatch, work_tmp):
     assert payload["doc_id"] == existing.doc_id
     assert payload["index_version"] == existing.index_version
     assert payload["source_url"] == existing.source_url
+    assert payload["file_url"] is None
 
 
 def test_registry_failure_cleans_only_new_namespace(client, monkeypatch, work_tmp):
@@ -160,6 +161,43 @@ def test_registry_failure_cleans_only_new_namespace(client, monkeypatch, work_tm
     new_version = compute_index_version(settings=settings, route="standard")
     assert vector_store.cleared == [vector_namespace(stored.doc_id, new_version)]
     assert vector_namespace(stored.doc_id, existing.index_version) not in vector_store.cleared
+
+
+def test_successful_ingest_persists_index_only_metadata(client, monkeypatch, work_tmp):
+    stored = _stored_file(work_tmp, "doc__abc12345")
+    fake_registry = FakeRegistry(None)
+    vector_store = RecordingVectorStore()
+
+    monkeypatch.setattr(documents, "registry", fake_registry)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(
+        documents,
+        "ocr_pdf_to_pages",
+        lambda **kwargs: [PageText(page_num=1, text="Intro paragraph.\n\nAnother paragraph.")],
+    )
+    monkeypatch.setattr(documents, "get_vector_store", lambda: vector_store)
+    monkeypatch.setattr("app.core.indexing.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
+
+    response = client.post(
+        "/api/v1/documents",
+        data={"source_url": "https://example.com/new.pdf"},
+        files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["file_url"] is None
+
+    saved = fake_registry.get(stored.doc_id)
+    assert saved is not None
+    assert saved.storage_path is None
+
+    all_metadata = [
+        metadata
+        for _namespace, items in vector_store.upserts
+        for _item_id, metadata in items
+    ]
+    assert all("file_url" not in metadata for metadata in all_metadata)
 
 
 def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace(
@@ -201,6 +239,7 @@ def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace
     assert restored is not None
     assert restored.index_version == previous_meta.index_version
     assert restored.source_url == previous_meta.source_url
+    assert restored.storage_path == previous_meta.storage_path
 
     new_version = compute_index_version(settings=settings, route="standard")
     assert vector_namespace(stored.doc_id, new_version) in vector_store.cleared
