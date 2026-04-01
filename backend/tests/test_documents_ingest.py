@@ -228,6 +228,44 @@ def test_successful_ingest_persists_index_only_metadata(client, monkeypatch, wor
     assert all("file_url" not in metadata for metadata in all_metadata)
 
 
+def test_successful_ingest_keeps_legacy_centroid_and_multi_vector_summaries(
+    client, monkeypatch, work_tmp
+):
+    stored = _stored_file(work_tmp, "doc__abc12345")
+    fake_registry = FakeRegistry(None)
+    vector_store = RecordingVectorStore()
+
+    monkeypatch.setattr(documents, "registry", fake_registry)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(
+        documents,
+        "ocr_pdf_to_pages",
+        lambda **kwargs: [PageText(page_num=1, text="Benefits overview.\n\nEligibility details.")],
+    )
+    monkeypatch.setattr(documents, "get_vector_store", lambda: vector_store)
+    monkeypatch.setattr("app.core.indexing.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
+    monkeypatch.setattr("app.core.doc_summaries.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
+
+    response = client.post(
+        "/api/v1/documents",
+        data={"source_url": "https://example.com/new.pdf"},
+        files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
+    )
+
+    assert response.status_code == 200
+    summary_upserts = [
+        items
+        for namespace, items in vector_store.upserts
+        if namespace == settings.doc_summary_namespace
+    ]
+    assert summary_upserts
+
+    summary_ids = [item_id for items in summary_upserts for item_id, _metadata in items]
+    assert stored.doc_id in summary_ids
+    assert f"{stored.doc_id}:profile" in summary_ids
+    assert f"{stored.doc_id}:headings" in summary_ids
+
+
 def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace(
     client, monkeypatch, work_tmp
 ):

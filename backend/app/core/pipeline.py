@@ -15,6 +15,7 @@ from app.config import Settings
 from app.core.cache import JsonCache, make_cache_key, normalize_query
 from app.core.context import select_context
 from app.core.doc_summaries import (
+    doc_summary_record_ids,
     lexical_doc_score,
     query_doc_summaries,
     select_doc_ids_from_matches,
@@ -74,17 +75,57 @@ def _build_lexical_doc_scores(
     *,
     metas: List[DocMeta],
     queries: List[str],
+    summary_fields_by_doc_id: Optional[Dict[str, List[str]]] = None,
 ) -> Dict[str, float]:
     scores: Dict[str, float] = {}
     non_empty_queries = [q for q in queries if (q or "").strip()]
     if not non_empty_queries:
         return scores
+    summary_fields_by_doc_id = summary_fields_by_doc_id or {}
     for meta in metas:
-        fields = [meta.filename, meta.slug, meta.source_url]
+        fields = [
+            meta.filename,
+            meta.slug,
+            meta.source_url,
+            *summary_fields_by_doc_id.get(meta.doc_id, []),
+        ]
         score = max(lexical_doc_score(query, fields) for query in non_empty_queries)
         if score > 0:
             scores[meta.doc_id] = score
     return scores
+
+
+def _load_doc_summary_lexical_fields(
+    *,
+    metas: List[DocMeta],
+    settings: Settings,
+    vector_store: PineconeVectorStore,
+) -> Dict[str, List[str]]:
+    fetch_records = getattr(vector_store, "fetch_records", None)
+    if not callable(fetch_records):
+        return {}
+
+    ids: List[str] = []
+    for meta in metas:
+        ids.extend(doc_summary_record_ids(meta.doc_id))
+    if not ids:
+        return {}
+
+    try:
+        records = fetch_records(ids=ids, namespace=settings.doc_summary_namespace) or {}
+    except Exception:
+        logger.exception("doc_summary_lexical_fields_load_failed")
+        return {}
+
+    summary_fields_by_doc_id: Dict[str, List[str]] = {}
+    for record in records.values():
+        metadata = record.get("metadata", {}) or {}
+        doc_id = str(metadata.get("doc_id") or record.get("id") or "").strip()
+        summary_text = str(metadata.get("summary_text") or "").strip()
+        if not doc_id or not summary_text:
+            continue
+        summary_fields_by_doc_id.setdefault(doc_id, []).append(summary_text)
+    return summary_fields_by_doc_id
 
 
 def _should_skip_rerank(
@@ -222,9 +263,15 @@ def select_docs_with_rewrite_retry(
         combined_matches.extend([{**match, "query_variant": "rewrite"} for match in matches2])
         break
 
+    summary_fields_by_doc_id = _load_doc_summary_lexical_fields(
+        metas=metas,
+        settings=settings,
+        vector_store=vector_store,
+    )
     lexical_scores = _build_lexical_doc_scores(
         metas=metas,
         queries=[query, rewritten_query] if rewritten_query != query else [query],
+        summary_fields_by_doc_id=summary_fields_by_doc_id,
     )
     selected_ids, strong, info = select_doc_ids_from_matches(
         combined_matches,

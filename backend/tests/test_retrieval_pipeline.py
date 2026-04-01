@@ -44,6 +44,18 @@ class FetchingVectorStore:
         }
 
 
+class SummaryRecordVectorStore:
+    def __init__(self, records):
+        self.records = dict(records)
+
+    def fetch_records(self, *, ids, namespace):
+        return {
+            record_id: dict(self.records[record_id])
+            for record_id in ids
+            if record_id in self.records
+        }
+
+
 class NoopVectorStore:
     pass
 
@@ -281,4 +293,52 @@ def test_doc_selection_falls_back_to_lexical_metadata(monkeypatch):
     assert selected_ids == ["employee-handbook"]
     assert strong is False
     assert retrieval_query == "employee handbook"
+    assert retrieval_embedding == [0.1, 0.2]
+
+
+def test_doc_selection_lexical_fallback_uses_summary_text(monkeypatch):
+    from app.core import pipeline
+
+    test_settings = replace(settings, doc_rewrite_max_attempts=0)
+    metas = [
+        replace(
+            _meta("doc1"),
+            filename="Benefits Guide.pdf",
+            source_url="https://example.com/hr/benefits-guide.pdf",
+        ),
+        replace(
+            _meta("doc2"),
+            filename="General Policies.pdf",
+            source_url="https://example.com/hr/general-policies.pdf",
+        ),
+    ]
+
+    monkeypatch.setattr(pipeline, "query_doc_summaries", lambda **kwargs: [])
+
+    vector_store = SummaryRecordVectorStore(
+        {
+            "doc1:headings": {
+                "id": "doc1:headings",
+                "metadata": {
+                    "doc_id": "doc1",
+                    "summary_kind": "headings",
+                    "summary_text": "Document headings Title: Benefits Guide Headings: COBRA enrollment and continuation coverage",
+                },
+            }
+        }
+    )
+
+    selected_ids, strong, retrieval_query, retrieval_embedding = select_docs_with_rewrite_retry(
+        query="cobra enrollment",
+        query_embedding=[0.1, 0.2],
+        metas=metas,
+        settings=test_settings,
+        vector_store=vector_store,
+        debug={},
+        allow_rewrite=True,
+    )
+
+    assert selected_ids == ["doc1"]
+    assert strong is False
+    assert retrieval_query == "cobra enrollment"
     assert retrieval_embedding == [0.1, 0.2]

@@ -321,6 +321,44 @@ def build_doc_summary_records(
     return items
 
 
+def build_legacy_doc_summary_record(
+    *,
+    doc_id: str,
+    slug: str,
+    filename: str,
+    source_url: str,
+    route: str,
+    page_count: int,
+    token_count: int,
+    index_version: str,
+    centroid_values: Sequence[float],
+    summary_text: str,
+    settings: Settings,
+) -> Dict[str, Any] | None:
+    values = list(centroid_values or [])
+    if not doc_id or not values:
+        return None
+    return {
+        "id": doc_id,
+        "values": values,
+        "metadata": {
+            "doc_id": doc_id,
+            "slug": slug,
+            "filename": filename,
+            "source_url": source_url,
+            "route": route,
+            "page_count": page_count,
+            "token_count": token_count,
+            "index_version": index_version,
+            "summary_kind": "centroid",
+            "summary_text": _normalize_space(summary_text),
+            "doc_summary_strategy": getattr(
+                settings, "doc_summary_strategy_version", "multi_vector_v1"
+            ),
+        },
+    }
+
+
 def upsert_doc_summaries(
     *,
     doc_id: str,
@@ -332,6 +370,7 @@ def upsert_doc_summaries(
     token_count: int,
     index_version: str,
     summary_texts: Mapping[str, str],
+    centroid_values: Optional[Sequence[float]],
     settings: Settings,
     vector_store: PineconeVectorStore,
 ) -> None:
@@ -347,10 +386,26 @@ def upsert_doc_summaries(
         summary_texts=summary_texts,
         settings=settings,
     )
+    legacy_record = build_legacy_doc_summary_record(
+        doc_id=doc_id,
+        slug=slug,
+        filename=filename,
+        source_url=source_url,
+        route=route,
+        page_count=page_count,
+        token_count=token_count,
+        index_version=index_version,
+        centroid_values=centroid_values or [],
+        summary_text=str(
+            summary_texts.get("profile")
+            or summary_texts.get("headings")
+            or ""
+        ),
+        settings=settings,
+    )
+    if legacy_record is not None:
+        records = [legacy_record, *records]
     upsert_doc_summary_records(records=records, settings=settings, vector_store=vector_store)
-    legacy_id = doc_id if records else ""
-    if legacy_id:
-        vector_store.delete_ids([legacy_id], namespace=settings.doc_summary_namespace)
 
 
 def query_doc_summaries(
