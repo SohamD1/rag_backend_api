@@ -15,6 +15,7 @@ from app.config import Settings
 from app.core.cache import JsonCache, make_cache_key, normalize_query
 from app.core.context import select_context
 from app.core.doc_summaries import (
+    lexical_doc_score,
     query_doc_summaries,
     select_doc_ids_from_matches,
 )
@@ -67,6 +68,23 @@ def _sort_metas_for_fallback(metas: List[DocMeta]) -> List[DocMeta]:
         return (m.created_at or "", m.filename.lower())
 
     return sorted(metas, key=key, reverse=True)
+
+
+def _build_lexical_doc_scores(
+    *,
+    metas: List[DocMeta],
+    queries: List[str],
+) -> Dict[str, float]:
+    scores: Dict[str, float] = {}
+    non_empty_queries = [q for q in queries if (q or "").strip()]
+    if not non_empty_queries:
+        return scores
+    for meta in metas:
+        fields = [meta.filename, meta.slug, meta.source_url]
+        score = max(lexical_doc_score(query, fields) for query in non_empty_queries)
+        if score > 0:
+            scores[meta.doc_id] = score
+    return scores
 
 
 def _should_skip_rerank(
@@ -177,58 +195,85 @@ def select_docs_with_rewrite_retry(
     debug: Optional[Dict[str, Any]] = None,
     allow_rewrite: bool = True,
 ) -> Tuple[List[str], bool, str, List[float]]:
-    # Pass 1: doc summaries with original query
-    matches = query_doc_summaries(
-        query_embedding=query_embedding, settings=settings, vector_store=vector_store
-    )
-    selected_ids, strong, info = select_doc_ids_from_matches(matches, settings=settings)
-    if debug is not None:
-        debug["doc_selection"] = {
-            "pass": 1,
-            "query_used": query,
-            **info,
-            "selected_doc_ids": selected_ids,
-        }
-
-    if strong:
-        return selected_ids, True, query, query_embedding
-
-    # Rewrite-and-retry (no query-shape heuristics)
     rewritten_query = query
     rewritten_embedding = query_embedding
-    for attempt in range(max(0, int(settings.doc_rewrite_max_attempts)) if allow_rewrite else 0):
+    combined_matches: List[Dict[str, Any]] = []
+
+    matches = query_doc_summaries(
+        query_embedding=query_embedding,
+        settings=settings,
+        vector_store=vector_store,
+        top_k=getattr(settings, "doc_summary_match_top_k", settings.doc_summary_top_k),
+    )
+    combined_matches.extend([{**match, "query_variant": "raw"} for match in matches])
+
+    rewrite_attempts = max(0, int(settings.doc_rewrite_max_attempts)) if allow_rewrite else 0
+    for attempt in range(rewrite_attempts):
         rewritten_query = rewrite_query_for_doc_selection(query, settings)
+        if rewritten_query.strip() == query.strip():
+            break
         rewritten_embedding = embed_texts([rewritten_query], settings)[0]
         matches2 = query_doc_summaries(
             query_embedding=rewritten_embedding,
             settings=settings,
             vector_store=vector_store,
+            top_k=getattr(settings, "doc_summary_match_top_k", settings.doc_summary_top_k),
         )
-        selected2, strong2, info2 = select_doc_ids_from_matches(matches2, settings=settings)
-        if debug is not None:
-            debug["doc_selection_retry"] = {
-                "pass": 2,
-                "attempt": attempt + 1,
-                "query_used": rewritten_query,
-                **info2,
-                "selected_doc_ids": selected2,
-            }
-            debug["rewritten_query"] = rewritten_query
-        if selected2:
-            selected_ids = selected2
-        strong = strong2
+        combined_matches.extend([{**match, "query_variant": "rewrite"} for match in matches2])
         break
 
-    # If doc summaries are empty/stale, fall back to top 3 by recency.
-    if not selected_ids:
-        fallback = [m.doc_id for m in _sort_metas_for_fallback(metas)[:3]]
-        if debug is not None:
-            debug["doc_selection_fallback"] = {"selected_doc_ids": fallback}
-        return fallback, False, query, query_embedding
+    lexical_scores = _build_lexical_doc_scores(
+        metas=metas,
+        queries=[query, rewritten_query] if rewritten_query != query else [query],
+    )
+    selected_ids, strong, info = select_doc_ids_from_matches(
+        combined_matches,
+        settings=settings,
+        lexical_scores=lexical_scores,
+        top_k_fallback=min(4, max(1, int(settings.doc_summary_top_k))),
+    )
+    if debug is not None:
+        debug["doc_selection"] = {
+            "query_used": query,
+            "rewritten_query": rewritten_query if rewritten_query != query else None,
+            "lexical_scores": lexical_scores,
+            **info,
+            "selected_doc_ids": selected_ids,
+        }
 
     if strong and selected_ids:
-        return [selected_ids[0]], True, rewritten_query, rewritten_embedding
-    return selected_ids[:3], False, rewritten_query, rewritten_embedding
+        if debug is not None:
+            debug["doc_selection"]["fallback"] = None
+        if rewritten_query != query:
+            return [selected_ids[0]], True, rewritten_query, rewritten_embedding
+        return [selected_ids[0]], True, query, query_embedding
+
+    if not selected_ids:
+        fallback = [
+            doc_id
+            for doc_id, _score in sorted(
+                lexical_scores.items(),
+                key=lambda item: (item[1], item[0]),
+                reverse=True,
+            )[:3]
+            if _score > 0
+        ]
+        if not fallback and len(metas) <= 4:
+            fallback = [m.doc_id for m in sorted(metas, key=lambda m: m.filename.lower())]
+        if not fallback:
+            fallback = [m.doc_id for m in _sort_metas_for_fallback(metas)[:3]]
+        if debug is not None:
+            debug["doc_selection_fallback"] = {
+                "selected_doc_ids": fallback,
+                "strategy": "lexical_then_small_corpus_then_recency",
+            }
+        return fallback, False, query, query_embedding
+
+    if debug is not None:
+        debug["doc_selection"]["fallback"] = None
+    if rewritten_query != query:
+        return selected_ids[:4], False, rewritten_query, rewritten_embedding
+    return selected_ids[:4], False, query, query_embedding
 
 
 def run_chat(
@@ -265,6 +310,12 @@ def run_chat(
             "doc_versions": doc_versions,
             "generation_model": settings.openai_generation_model,
             "doc_summary_top_k": settings.doc_summary_top_k,
+            "doc_summary_match_top_k": getattr(
+                settings, "doc_summary_match_top_k", settings.doc_summary_top_k
+            ),
+            "doc_summary_strategy_version": getattr(
+                settings, "doc_summary_strategy_version", "multi_vector_v1"
+            ),
             "doc_strong_min_score": settings.doc_strong_min_score,
             "doc_strong_min_ratio": settings.doc_strong_min_ratio,
             "max_context_tokens": settings.max_context_tokens,
@@ -305,7 +356,7 @@ def run_chat(
         settings=settings,
         vector_store=vector_store,
         debug=debug_info,
-        allow_rewrite=False,
+        allow_rewrite=True,
     )
     _stage_end(on_event, "doc_selection", int((perf_counter() - t_select) * 1000))
 

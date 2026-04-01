@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from app.config import settings
-from app.core.pipeline import run_chat
+from app.core.pipeline import run_chat, select_docs_with_rewrite_retry
 from app.core.retrieval import RetrievalItem
 from app.storage.registry import DocMeta
 
@@ -42,6 +42,10 @@ class FetchingVectorStore:
             for source_id in ids
             if source_id in self.embedding_by_id
         }
+
+
+class NoopVectorStore:
+    pass
 
 
 def _meta(doc_id: str) -> DocMeta:
@@ -193,3 +197,88 @@ def test_clean_retrieval_writes_caches(monkeypatch):
     assert payload["chunks"]
     assert retrieval_cache.set_calls
     assert response_cache.set_calls
+
+
+def test_doc_selection_aggregates_summary_kinds_and_initial_rewrite(monkeypatch):
+    from app.core import pipeline
+
+    test_settings = replace(settings, doc_rewrite_max_attempts=1)
+    metas = [_meta("doc1"), _meta("doc2")]
+    rewrite_embedding = [0.9, 0.1]
+
+    monkeypatch.setattr(pipeline, "rewrite_query_for_doc_selection", lambda query, settings: "benefits enrollment")
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [rewrite_embedding for _ in texts],
+    )
+
+    def fake_query_doc_summaries(**kwargs):
+        if kwargs["query_embedding"] == rewrite_embedding:
+            return [
+                {
+                    "id": "doc1:headings",
+                    "score": 0.34,
+                    "metadata": {"doc_id": "doc1", "summary_kind": "headings"},
+                }
+            ]
+        return [
+            {
+                "id": "doc1:profile",
+                "score": 0.37,
+                "metadata": {"doc_id": "doc1", "summary_kind": "profile"},
+            },
+            {
+                "id": "doc2:profile",
+                "score": 0.36,
+                "metadata": {"doc_id": "doc2", "summary_kind": "profile"},
+            },
+        ]
+
+    monkeypatch.setattr(pipeline, "query_doc_summaries", fake_query_doc_summaries)
+
+    selected_ids, strong, retrieval_query, retrieval_embedding = select_docs_with_rewrite_retry(
+        query="what are the benefits",
+        query_embedding=[0.1, 0.2],
+        metas=metas,
+        settings=test_settings,
+        vector_store=NoopVectorStore(),
+        debug={},
+        allow_rewrite=True,
+    )
+
+    assert selected_ids == ["doc1"]
+    assert strong is True
+    assert retrieval_query == "benefits enrollment"
+    assert retrieval_embedding == rewrite_embedding
+
+
+def test_doc_selection_falls_back_to_lexical_metadata(monkeypatch):
+    from app.core import pipeline
+
+    test_settings = replace(settings, doc_rewrite_max_attempts=0)
+    metas = [
+        _meta("doc1"),
+        replace(
+            _meta("employee-handbook"),
+            filename="Employee Handbook 2026.pdf",
+            source_url="https://example.com/hr/employee-handbook-2026.pdf",
+        ),
+    ]
+
+    monkeypatch.setattr(pipeline, "query_doc_summaries", lambda **kwargs: [])
+
+    selected_ids, strong, retrieval_query, retrieval_embedding = select_docs_with_rewrite_retry(
+        query="employee handbook",
+        query_embedding=[0.1, 0.2],
+        metas=metas,
+        settings=test_settings,
+        vector_store=NoopVectorStore(),
+        debug={},
+        allow_rewrite=True,
+    )
+
+    assert selected_ids == ["employee-handbook"]
+    assert strong is False
+    assert retrieval_query == "employee handbook"
+    assert retrieval_embedding == [0.1, 0.2]

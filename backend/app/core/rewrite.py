@@ -7,8 +7,8 @@ from app.core.json_utils import extract_json_object
 
 def rewrite_query_for_doc_selection(query: str, settings: Settings) -> str:
     """
-    No query-shape heuristics. This is invoked only when doc selection is not confident.
-    Output is used for doc-summary selection (and then retrieval).
+    No query-shape heuristics. Output is used for doc-summary selection
+    and may also be reused for retrieval when it improves routing.
     """
     text = (query or "").strip()
     if not text:
