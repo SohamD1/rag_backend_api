@@ -96,6 +96,15 @@ class DocRegistry:
                 continue
         return metas
 
+    def find_by_checksum(self, checksum: str) -> Optional[DocMeta]:
+        checksum = str(checksum or "").strip().lower()
+        if not checksum:
+            return None
+        for meta in self.list():
+            if str(meta.checksum or "").strip().lower() == checksum:
+                return meta
+        return None
+
     def delete(self, doc_id: str) -> bool:
         path = self._path(doc_id)
         if not path.exists():

@@ -28,6 +28,10 @@ def compute_index_version(*, settings: Settings, route: str) -> str:
             "max": settings.chunk_max_tokens,
             "overlap": settings.chunk_overlap_tokens,
         },
+        "doc_summary": {
+            "strategy_version": getattr(settings, "doc_summary_strategy_version", "multi_vector_v1"),
+            "kinds": ["profile", "headings"],
+        },
         "tree": {
             "heading_preview_tokens": 250,
             "leaf_max_tokens": 900,

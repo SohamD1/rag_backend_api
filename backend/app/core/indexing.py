@@ -8,7 +8,11 @@ from app.adapters.embeddings import embed_texts
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.config import Settings
 from app.core.chunking import chunk_document
-from app.core.doc_summaries import compute_centroid
+from app.core.doc_summaries import (
+    build_doc_summary_texts,
+    compute_centroid,
+    extract_heading_candidates_from_texts,
+)
 from app.core.pdf_text import PageText
 from app.core.vector_namespace import vector_namespace
 from app.services.tree_index import TreeNode, build_tree, save_headings, save_tree, trace_path
@@ -18,6 +22,7 @@ from app.services.tree_index import TreeNode, build_tree, save_headings, save_tr
 class IndexBuildResult:
     indexed_count: int
     centroid: List[float]
+    doc_summary_texts: Dict[str, str]
     namespace: str
 
 
@@ -47,6 +52,17 @@ def build_standard_index(
     embeddings = embed_texts(texts, settings)
 
     centroid = compute_centroid(embeddings)
+    heading_candidates = extract_heading_candidates_from_texts([page.text for page in pages])
+    doc_summary_texts = build_doc_summary_texts(
+        slug=slug,
+        filename=filename,
+        source_url=source_url,
+        route="standard",
+        page_count=page_count,
+        token_count=token_count,
+        abstract_fragments=texts[:2],
+        headings=heading_candidates,
+    )
 
     namespace = vector_namespace(doc_id, index_version)
     items = []
@@ -74,7 +90,12 @@ def build_standard_index(
         )
 
     vector_store.upsert(items, namespace=namespace)
-    return IndexBuildResult(indexed_count=len(items), centroid=centroid, namespace=namespace)
+    return IndexBuildResult(
+        indexed_count=len(items),
+        centroid=centroid,
+        doc_summary_texts=doc_summary_texts,
+        namespace=namespace,
+    )
 
 
 def build_tree_index(
@@ -148,6 +169,26 @@ def build_tree_index(
     embeddings = embed_texts(embed_inputs, settings)
 
     centroid = compute_centroid(embeddings)
+    heading_titles = [
+        node.title
+        for node in nodes_to_embed
+        if node.level in {"section", "subsection", "subsubsection"} and node.title
+    ]
+    abstract_fragments = [
+        (node.summary or "").strip() or (node.text_span or "").strip()
+        for node in nodes_to_embed
+        if node.level in {"section", "subsection", "subsubsection"}
+    ]
+    doc_summary_texts = build_doc_summary_texts(
+        slug=slug,
+        filename=filename,
+        source_url=source_url,
+        route="tree",
+        page_count=page_count,
+        token_count=token_count,
+        abstract_fragments=abstract_fragments[:4],
+        headings=heading_titles,
+    )
 
     items = [
         {"id": node.node_id, "values": emb, "metadata": meta}
@@ -155,4 +196,9 @@ def build_tree_index(
     ]
 
     vector_store.upsert(items, namespace=namespace)
-    return IndexBuildResult(indexed_count=len(items), centroid=centroid, namespace=namespace)
+    return IndexBuildResult(
+        indexed_count=len(items),
+        centroid=centroid,
+        doc_summary_texts=doc_summary_texts,
+        namespace=namespace,
+    )

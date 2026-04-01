@@ -122,3 +122,24 @@ class PineconeVectorStore:
             if values:
                 out[str(vec_id)] = values
         return out
+
+    def fetch_records(self, *, ids: List[str], namespace: str) -> Dict[str, Dict]:
+        ids = [i for i in (ids or []) if i]
+        if not ids:
+            return {}
+        if getattr(self.settings, "log_payloads", False):
+            logger.info("pinecone_fetch_records %s", {"namespace": namespace, "count": len(ids)})
+        response = self.index.fetch(
+            ids=ids,
+            namespace=namespace,
+            _request_timeout=self._request_timeout(),
+        )
+        vectors = response.get("vectors", {}) or {}
+        out: Dict[str, Dict] = {}
+        for vec_id, payload in vectors.items():
+            out[str(vec_id)] = {
+                "id": str(vec_id),
+                "values": list(payload.get("values") or []),
+                "metadata": dict(payload.get("metadata", {}) or {}),
+            }
+        return out

@@ -1,7 +1,8 @@
 import logging
+from dataclasses import replace
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 
@@ -16,7 +17,12 @@ from app.config import (
     resolve_tree_dir,
     settings,
 )
-from app.core.doc_summaries import upsert_doc_centroid
+from app.core.doc_summaries import (
+    delete_doc_summary_records,
+    doc_summary_record_ids,
+    upsert_doc_summaries,
+    upsert_doc_summary_records,
+)
 from app.core.index_version import compute_index_version
 from app.core.indexing import IndexBuildResult, build_standard_index, build_tree_index
 from app.core.tokens import estimate_tokens
@@ -43,7 +49,7 @@ class IngestState:
     temp_upload_created: bool = False
     had_existing_doc: bool = False
     previous_meta: DocMeta | None = None
-    previous_doc_summary: List[float] | None = None
+    previous_doc_summary_records: Dict[str, Dict] | None = None
     route: str | None = None
     index_version: str | None = None
     target_namespace: str | None = None
@@ -123,24 +129,24 @@ def _cleanup_failed_ingest(
 
         if not state.had_existing_doc:
             try:
-                vector_store.delete_ids([state.doc_id], namespace=settings.doc_summary_namespace)
+                delete_doc_summary_records(
+                    doc_id=state.doc_id,
+                    settings=settings,
+                    vector_store=vector_store,
+                )
             except Exception:
                 logger.exception(
                     "ingest_cleanup_failed step=delete_doc_summary doc_id=%s",
                     state.doc_id,
                 )
-        elif state.doc_summary_saved and state.previous_meta and state.previous_doc_summary:
+        elif (
+            state.doc_summary_saved
+            and state.previous_meta
+            and state.previous_doc_summary_records
+        ):
             try:
-                upsert_doc_centroid(
-                    doc_id=state.previous_meta.doc_id,
-                    slug=state.previous_meta.slug,
-                    filename=state.previous_meta.filename,
-                    source_url=state.previous_meta.source_url,
-                    route=state.previous_meta.route,
-                    page_count=state.previous_meta.page_count,
-                    token_count=state.previous_meta.token_count,
-                    index_version=state.previous_meta.index_version,
-                    centroid=state.previous_doc_summary,
+                upsert_doc_summary_records(
+                    records=list(state.previous_doc_summary_records.values()),
                     settings=settings,
                     vector_store=vector_store,
                 )
@@ -273,7 +279,11 @@ def _delete_document_vectors(
         ) from exc
 
     try:
-        vector_store.delete_ids([doc_id], namespace=settings.doc_summary_namespace)
+        delete_doc_summary_records(
+            doc_id=doc_id,
+            settings=settings,
+            vector_store=vector_store,
+        )
     except Exception as exc:
         logger.exception("delete_failed step=delete_doc_summary doc_id=%s", doc_id)
         raise HTTPException(
@@ -318,6 +328,10 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
     except Exception as exc:
         logger.exception("upload_failed stage=save_upload")
         raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}") from exc
+
+    duplicate = getattr(registry, "find_by_checksum", lambda checksum: None)(stored.checksum)
+    if duplicate is not None and duplicate.doc_id != stored.doc_id:
+        stored = replace(stored, doc_id=duplicate.doc_id, slug=duplicate.slug)
 
     state.doc_id = stored.doc_id
     state.storage_path = stored.path
@@ -416,10 +430,10 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
             vector_store = get_vector_store()
             if existing is not None:
                 try:
-                    previous_doc_summary = vector_store.fetch(
-                        ids=[stored.doc_id], namespace=settings.doc_summary_namespace
+                    state.previous_doc_summary_records = vector_store.fetch_records(
+                        ids=doc_summary_record_ids(stored.doc_id),
+                        namespace=settings.doc_summary_namespace,
                     )
-                    state.previous_doc_summary = previous_doc_summary.get(stored.doc_id)
                 except Exception:
                     logger.exception(
                         "upload_failed stage=fetch_previous_doc_summary doc_id=%s",
@@ -484,7 +498,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
         state.registry_saved = True
         state.stage = "doc_summary"
         try:
-            upsert_doc_centroid(
+            upsert_doc_summaries(
                 doc_id=stored.doc_id,
                 slug=stored.slug,
                 filename=stored.filename,
@@ -493,7 +507,7 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
                 page_count=page_count,
                 token_count=token_count,
                 index_version=index_version,
-                centroid=build_result.centroid,
+                summary_texts=build_result.doc_summary_texts,
                 settings=settings,
                 vector_store=vector_store,
             )

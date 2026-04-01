@@ -114,9 +114,13 @@ class Settings:
         "MISTRAL_OCR_DELETE_UPLOADED_FILE", "true", cast=_bool_env
     )
 
-    # Doc selection via doc-summary centroid vectors
+    # Doc selection via multi-vector doc summaries
     doc_summary_namespace: str = _get_env("DOC_SUMMARY_NAMESPACE", "__doc_summaries")
     doc_summary_top_k: int = _get_env("DOC_SUMMARY_TOP_K", 3, int)
+    doc_summary_match_top_k: int = _get_env("DOC_SUMMARY_MATCH_TOP_K", 12, int)
+    doc_summary_strategy_version: str = _get_env(
+        "DOC_SUMMARY_STRATEGY_VERSION", "multi_vector_v1"
+    )
     doc_strong_min_score: float = _get_env("DOC_STRONG_MIN_SCORE", 0.35, float)
     doc_strong_min_ratio: float = _get_env("DOC_STRONG_MIN_RATIO", 1.15, float)
     doc_rewrite_max_attempts: int = _get_env("DOC_REWRITE_MAX_ATTEMPTS", 1, int)
