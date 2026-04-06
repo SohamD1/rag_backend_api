@@ -677,11 +677,26 @@ def run_chat(
 
     # Strict rewrite policy: only retry once we see low confidence after retrieval/rerank.
     if reranked[0].score < settings.low_confidence_threshold and int(settings.doc_rewrite_max_attempts) > 0:
-        t_rewrite = perf_counter()
-        _stage_start(on_event, "rewrite_query")
-        rewritten_query = rewrite_query_for_doc_selection(query, settings)
-        rewritten_embedding = embed_texts([rewritten_query], settings)[0]
-        _stage_end(on_event, "rewrite_query", int((perf_counter() - t_rewrite) * 1000))
+        rewritten_query = retrieval_query
+        rewritten_embedding = retrieval_embedding
+        reused_initial_rewrite = rewritten_query.strip() != query.strip()
+
+        if not reused_initial_rewrite:
+            t_rewrite = perf_counter()
+            _stage_start(on_event, "rewrite_query")
+            rewritten_query = rewrite_query_for_doc_selection(query, settings)
+            rewritten_embedding = embed_texts([rewritten_query], settings)[0]
+            _stage_end(on_event, "rewrite_query", int((perf_counter() - t_rewrite) * 1000))
+        else:
+            _emit(
+                on_event,
+                "info",
+                {
+                    "stage": "rewrite_query",
+                    "skipped": True,
+                    "reason": "reused_initial_rewrite",
+                },
+            )
 
         t_select_retry = perf_counter()
         _stage_start(on_event, "doc_selection_rewrite")
@@ -726,6 +741,7 @@ def run_chat(
                 "retry_top_score": retry_top,
                 "applied": used_rewrite_retry,
                 "retry_degraded": retry_degraded,
+                "reused_initial_rewrite": reused_initial_rewrite,
             }
 
     generation_enabled = bool(getattr(settings, "rag_generate_answers_enabled", True))

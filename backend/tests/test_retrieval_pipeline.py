@@ -567,3 +567,93 @@ def test_run_chat_does_not_cache_partial_tree_degradation(monkeypatch):
     assert payload["debug"]["retrieval_degraded"]["stages"][0]["degraded_doc_ids"] == ["doc-tree"]
     assert retrieval_cache.set_calls == []
     assert response_cache.set_calls == []
+
+
+def test_run_chat_reuses_initial_rewrite_for_low_confidence_retry(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(
+        settings,
+        rag_generate_answers_enabled=False,
+        doc_rewrite_max_attempts=1,
+        low_confidence_threshold=0.95,
+    )
+    rewrite_calls = []
+    raw_embedding = [0.1, 0.2]
+    rewrite_embedding = [0.9, 0.1]
+
+    def fake_rewrite(query, settings):
+        rewrite_calls.append(query)
+        return "benefits enrollment"
+
+    def fake_embed_texts(texts, settings):
+        return [rewrite_embedding if text == "benefits enrollment" else raw_embedding for text in texts]
+
+    def fake_query_doc_summaries(**kwargs):
+        embedding = kwargs["query_embedding"]
+        if embedding == rewrite_embedding:
+            return [
+                {
+                    "id": "doc1:profile",
+                    "score": 0.39,
+                    "metadata": {"doc_id": "doc1", "summary_kind": "profile"},
+                }
+            ]
+        return [
+            {
+                "id": "doc1:profile",
+                "score": 0.34,
+                "metadata": {"doc_id": "doc1", "summary_kind": "profile"},
+            }
+        ]
+
+    monkeypatch.setattr(pipeline, "rewrite_query_for_doc_selection", fake_rewrite)
+    monkeypatch.setattr(pipeline, "embed_texts", fake_embed_texts)
+    monkeypatch.setattr(pipeline, "query_doc_summaries", fake_query_doc_summaries)
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename="doc1.pdf",
+                file_url=None,
+                source_url="https://example.com/doc1.pdf",
+                text="useful evidence",
+                score=0.2,
+                page_start=1,
+                page_end=1,
+                section_title="Intro",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "select_context",
+        lambda **kwargs: (
+            kwargs["items"],
+            [{"header": "doc=doc1 pages=1-1", "text": "useful evidence"}],
+        ),
+    )
+
+    payload = run_chat(
+        query="what are the benefits",
+        debug_enabled=True,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["chunks"]
+    assert rewrite_calls == ["what are the benefits"]
+    assert payload["debug"]["rewrite_retry"]["reused_initial_rewrite"] is True
