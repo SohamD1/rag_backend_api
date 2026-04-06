@@ -30,11 +30,48 @@ _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 _BULLET_RE = re.compile(r"^\s*(?:[-*•]|[0-9]+[.)]|[A-Za-z][.)])\s+")
 
 
+_HEADING_PREFIX_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*|[A-Z]|[IVXLC]+)[).:\-\s]+")
+
+
 def _normalize(text: str) -> str:
     raw = (text or "").replace("\r\n", "\n").replace("\r", "\n")
     # Collapse excessive blank lines to a single paragraph break.
     raw = re.sub(r"\n{3,}", "\n\n", raw)
     return raw
+
+
+def _clean_heading_candidate(text: str) -> Optional[str]:
+    candidate = " ".join((text or "").split()).strip(" -:\t")
+    if not candidate:
+        return None
+    if len(candidate) < 4 or len(candidate) > 120:
+        return None
+    if len(candidate.split()) > 14:
+        return None
+    if candidate.count("|") >= 2 or re.fullmatch(r"[\d\W]+", candidate):
+        return None
+
+    normalized = _HEADING_PREFIX_RE.sub("", candidate).strip()
+    if len(normalized) < 4:
+        return None
+    if normalized.endswith((".", "!", "?")):
+        return None
+
+    alpha_chars = sum(1 for ch in normalized if ch.isalpha())
+    if alpha_chars < max(3, len(normalized) // 4):
+        return None
+
+    words = normalized.split()
+    title_ratio = sum(1 for word in words if word[:1].isupper()) / max(1, len(words))
+    looks_heading = (
+        normalized.isupper()
+        or title_ratio >= 0.6
+        or bool(re.match(r"^\d+(?:\.\d+)*\s+\S+", candidate))
+        or candidate.endswith(":")
+    )
+    if not looks_heading:
+        return None
+    return normalized.rstrip(":")
 
 
 def _should_preserve_line_breaks(text: str) -> bool:
@@ -155,9 +192,10 @@ def chunk_document(
     overlap_tokens: int,
 ) -> List[Chunk]:
     """
-    Deterministic "semantic" chunking without heading heuristics:
+    Deterministic "semantic" chunking with lightweight heading awareness:
     - paragraph blocks from explicit blank lines
     - pack full paragraphs into ~target_tokens, bounded by [min_tokens, max_tokens]
+    - flush chunk boundaries when OCR exposes likely section headings
     - 10% overlap implemented as carrying forward the tail blocks until overlap_tokens is met
     """
     if min_tokens <= 0 or target_tokens <= 0 or max_tokens <= 0:
@@ -191,6 +229,7 @@ def chunk_document(
         return kept
 
     buf_is_overlap = False
+    current_section_title: Optional[str] = None
 
     def flush_buf() -> None:
         nonlocal buf, buf_tokens, buf_is_overlap
@@ -198,18 +237,22 @@ def chunk_document(
         if text:
             page_start = buf[0].page_num
             page_end = buf[-1].page_num
+            section_title = current_section_title or (
+                f"Page {page_start}"
+                if page_start == page_end
+                else f"Pages {page_start}-{page_end}"
+            )
+            chunk_text = text
+            if current_section_title and not text.lower().startswith(current_section_title.lower()):
+                chunk_text = f"{current_section_title}\n\n{text}"
             chunks.append(
                 Chunk(
                     chunk_id=f"{doc_id}:c{len(chunks)}",
                     doc_id=doc_id,
-                    text=text,
+                    text=chunk_text,
                     page_start=page_start,
                     page_end=page_end,
-                    section_title=(
-                        f"Page {page_start}"
-                        if page_start == page_end
-                        else f"Pages {page_start}-{page_end}"
-                    ),
+                    section_title=section_title,
                     layout_mode=buf[0].layout_mode if buf else "flow_text",
                 )
             )
@@ -221,6 +264,17 @@ def chunk_document(
     buf: List[_Block] = []
     buf_tokens = 0
     for block in expanded:
+        heading = _clean_heading_candidate(block.text)
+        if heading is not None:
+            if buf and not buf_is_overlap:
+                flush_buf()
+            # Never carry overlap across an explicit heading boundary.
+            buf = []
+            buf_tokens = 0
+            buf_is_overlap = False
+            current_section_title = heading
+            continue
+
         bt = estimate_tokens(block.text, model)
         if buf and buf_tokens + bt > max_tokens:
             if buf_is_overlap:
@@ -251,18 +305,22 @@ def chunk_document(
         if text:
             page_start = buf[0].page_num
             page_end = buf[-1].page_num
+            section_title = current_section_title or (
+                f"Page {page_start}"
+                if page_start == page_end
+                else f"Pages {page_start}-{page_end}"
+            )
+            chunk_text = text
+            if current_section_title and not text.lower().startswith(current_section_title.lower()):
+                chunk_text = f"{current_section_title}\n\n{text}"
             chunks.append(
                 Chunk(
                     chunk_id=f"{doc_id}:c{len(chunks)}",
                     doc_id=doc_id,
-                    text=text,
+                    text=chunk_text,
                     page_start=page_start,
                     page_end=page_end,
-                    section_title=(
-                        f"Page {page_start}"
-                        if page_start == page_end
-                        else f"Pages {page_start}-{page_end}"
-                    ),
+                    section_title=section_title,
                     layout_mode=buf[0].layout_mode if buf else "flow_text",
                 )
             )

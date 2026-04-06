@@ -54,3 +54,64 @@ def test_chunking_preserves_list_layout_for_ocrish_pages():
     assert len(chunks) == 1
     assert chunks[0].layout_mode == "preserve_lines"
     assert "Item one\n\nItem two" in chunks[0].text
+
+
+def test_chunking_splits_on_heading_boundaries():
+    chunks = chunk_document(
+        doc_id="doc1",
+        pages=[
+            PageText(
+                page_num=1,
+                text=(
+                    "Benefits Overview\n\n"
+                    "Eligibility begins on the first of the month.\n\n"
+                    "Enrollment Rules\n\n"
+                    "Open enrollment changes must be submitted within thirty days."
+                ),
+            )
+        ],
+        model=settings.openai_embedding_model,
+        min_tokens=1,
+        target_tokens=200,
+        max_tokens=300,
+        overlap_tokens=0,
+    )
+
+    assert len(chunks) == 2
+    assert chunks[0].section_title == "Benefits Overview"
+    assert chunks[0].text.startswith("Benefits Overview\n\n")
+    assert "Eligibility begins on the first of the month." in chunks[0].text
+    assert chunks[1].section_title == "Enrollment Rules"
+    assert chunks[1].text.startswith("Enrollment Rules\n\n")
+    assert "Open enrollment changes must be submitted within thirty days." in chunks[1].text
+
+
+def test_chunking_keeps_active_heading_across_pages_until_replaced():
+    chunks = chunk_document(
+        doc_id="doc1",
+        pages=[
+            PageText(
+                page_num=1,
+                text=(
+                    "Benefits Overview\n\n"
+                    "Eligibility begins on the first of the month."
+                ),
+            ),
+            PageText(
+                page_num=2,
+                text="Coverage remains active while employed.",
+            ),
+        ],
+        model=settings.openai_embedding_model,
+        min_tokens=1,
+        target_tokens=200,
+        max_tokens=300,
+        overlap_tokens=0,
+    )
+
+    assert len(chunks) == 1
+    assert chunks[0].section_title == "Benefits Overview"
+    assert chunks[0].page_start == 1
+    assert chunks[0].page_end == 2
+    assert chunks[0].text.startswith("Benefits Overview\n\n")
+    assert "Coverage remains active while employed." in chunks[0].text

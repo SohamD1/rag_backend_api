@@ -104,7 +104,7 @@ class Settings:
     chunk_min_tokens: int = _get_env("CHUNK_MIN_TOKENS", 350, int)
     chunk_max_tokens: int = _get_env("CHUNK_MAX_TOKENS", 450, int)
     chunk_overlap_tokens: int = _get_env("CHUNK_OVERLAP_TOKENS", 40, int)
-    chunking_logic_version: str = _get_env("CHUNKING_LOGIC_VERSION", "v2_layout_aware")
+    chunking_logic_version: str = _get_env("CHUNKING_LOGIC_VERSION", "v3_heading_aware")
 
     # OCR config mirrored here for index-versioning and operational visibility.
     mistral_base_url: str = _get_env("MISTRAL_BASE_URL", "https://api.mistral.ai")
