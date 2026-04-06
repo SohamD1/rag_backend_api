@@ -264,6 +264,7 @@ def test_successful_ingest_keeps_legacy_centroid_and_multi_vector_summaries(
     assert stored.doc_id in summary_ids
     assert f"{stored.doc_id}:profile" in summary_ids
     assert f"{stored.doc_id}:headings" in summary_ids
+    assert f"{stored.doc_id}:keywords" in summary_ids
 
 
 def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace(
