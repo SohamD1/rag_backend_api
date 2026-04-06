@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from urllib.parse import urlparse
 
 from app.adapters.embeddings import embed_texts
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.config import Settings
 
 
-DOC_SUMMARY_KINDS: Tuple[str, ...] = ("profile", "headings")
+DOC_SUMMARY_KINDS: Tuple[str, ...] = ("profile", "headings", "keywords")
 _STOPWORDS = {
     "a",
     "an",
@@ -160,6 +162,14 @@ def _tokenize_lexical(text: str) -> List[str]:
     ]
 
 
+def _extract_source_url_terms(source_url: str) -> List[str]:
+    try:
+        parsed = urlparse(source_url or "")
+    except Exception:
+        return _tokenize_lexical(source_url)
+    return _tokenize_lexical(" ".join(part for part in [parsed.netloc, parsed.path] if part))
+
+
 def lexical_doc_score(query: str, fields: Sequence[str]) -> float:
     query_tokens = _tokenize_lexical(query)
     if not query_tokens:
@@ -246,6 +256,28 @@ def build_doc_summary_texts(
     if not abstract:
         abstract = "No abstract extracted."
 
+    keyword_weights: Counter[str] = Counter()
+    for token in _tokenize_lexical(filename):
+        keyword_weights[token] += 3
+    for token in _tokenize_lexical(slug):
+        keyword_weights[token] += 3
+    for token in _extract_source_url_terms(source_url):
+        keyword_weights[token] += 2
+    for heading in cleaned_headings:
+        for token in _tokenize_lexical(heading):
+            keyword_weights[token] += 4
+    for fragment in abstract_fragments:
+        for token in _tokenize_lexical(fragment):
+            keyword_weights[token] += 1
+
+    ranked_keywords = [
+        token
+        for token, _score in sorted(
+            keyword_weights.items(),
+            key=lambda item: (-item[1], -len(item[0]), item[0]),
+        )[:24]
+    ]
+
     profile_lines = [
         "Document profile",
         f"Filename: {filename or slug or 'document'}",
@@ -266,10 +298,20 @@ def build_doc_summary_texts(
     else:
         headings_lines.append("Headings: none extracted")
     headings_lines.append(f"Abstract: {abstract}")
+    keywords_lines = [
+        "Document keywords",
+        f"Filename: {filename or slug or 'document'}",
+        f"Title: {slug or filename or 'document'}",
+        "Keywords: "
+        + (" | ".join(ranked_keywords) if ranked_keywords else "none extracted"),
+    ]
+    if cleaned_headings:
+        keywords_lines.append("Key headings: " + " | ".join(cleaned_headings[:8]))
 
     return {
         "profile": "\n".join(profile_lines).strip(),
         "headings": "\n".join(headings_lines).strip(),
+        "keywords": "\n".join(keywords_lines).strip(),
     }
 
 
