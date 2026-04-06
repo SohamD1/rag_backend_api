@@ -26,6 +26,15 @@ def test_index_version_changes_when_chunking_logic_changes():
     assert changed != base
 
 
+def test_index_version_changes_when_doc_summary_strategy_changes():
+    base = compute_index_version(settings=settings, route="standard")
+    changed = compute_index_version(
+        settings=replace(settings, doc_summary_strategy_version="multi_vector_v2"),
+        route="standard",
+    )
+    assert changed != base
+
+
 def test_chunking_preserves_list_layout_for_ocrish_pages():
     chunks = chunk_document(
         doc_id="doc1",
