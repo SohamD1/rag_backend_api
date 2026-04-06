@@ -265,6 +265,50 @@ def test_doc_selection_aggregates_summary_kinds_and_initial_rewrite(monkeypatch)
     assert retrieval_embedding == rewrite_embedding
 
 
+def test_doc_selection_can_win_on_keywords_signal(monkeypatch):
+    from app.core import pipeline
+
+    test_settings = replace(settings, doc_rewrite_max_attempts=0)
+    metas = [_meta("doc1"), _meta("doc2")]
+
+    monkeypatch.setattr(
+        pipeline,
+        "query_doc_summaries",
+        lambda **kwargs: [
+            {
+                "id": "doc1:profile",
+                "score": 0.35,
+                "metadata": {"doc_id": "doc1", "summary_kind": "profile"},
+            },
+            {
+                "id": "doc1:keywords",
+                "score": 0.41,
+                "metadata": {"doc_id": "doc1", "summary_kind": "keywords"},
+            },
+            {
+                "id": "doc2:profile",
+                "score": 0.36,
+                "metadata": {"doc_id": "doc2", "summary_kind": "profile"},
+            },
+        ],
+    )
+
+    selected_ids, strong, retrieval_query, retrieval_embedding = select_docs_with_rewrite_retry(
+        query="cobra continuation coverage",
+        query_embedding=[0.1, 0.2],
+        metas=metas,
+        settings=test_settings,
+        vector_store=NoopVectorStore(),
+        debug={},
+        allow_rewrite=True,
+    )
+
+    assert selected_ids == ["doc1"]
+    assert strong is True
+    assert retrieval_query == "cobra continuation coverage"
+    assert retrieval_embedding == [0.1, 0.2]
+
+
 def test_doc_selection_falls_back_to_lexical_metadata(monkeypatch):
     from app.core import pipeline
 
