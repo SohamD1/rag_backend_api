@@ -30,7 +30,7 @@ def compute_index_version(*, settings: Settings, route: str) -> str:
         },
         "doc_summary": {
             "strategy_version": getattr(settings, "doc_summary_strategy_version", "multi_vector_v1"),
-            "kinds": ["profile", "headings"],
+            "kinds": ["profile", "headings", "keywords"],
         },
         "tree": {
             "heading_preview_tokens": 250,
