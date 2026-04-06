@@ -4,7 +4,7 @@ from dataclasses import replace
 
 from app.config import settings
 from app.core.pipeline import run_chat, select_docs_with_rewrite_retry
-from app.core.retrieval import RetrievalItem
+from app.core.retrieval import RetrievalItem, retrieve_tree_for_doc
 from app.storage.registry import DocMeta
 
 
@@ -63,6 +63,51 @@ class NoopVectorStore:
 class SummaryFetchGuardVectorStore:
     def fetch_records(self, *, ids, namespace):
         raise AssertionError("summary fetch should not run for strong doc selection")
+
+
+class TreeQueryVectorStore:
+    def __init__(self):
+        self.calls = []
+
+    def query(self, *, vector, top_k, namespace, filter=None):
+        self.calls.append({"top_k": top_k, "namespace": namespace, "filter": dict(filter or {})})
+        level = (filter or {}).get("level", {}).get("$eq")
+        if level == "section":
+            raise RuntimeError("section heading query failed")
+        if level == "subsection":
+            return [
+                {
+                    "id": "node-1",
+                    "score": 0.82,
+                    "metadata": {
+                        "doc_id": "doc-tree",
+                        "node_id": "node-1",
+                        "section_id": "section-1",
+                        "level": "subsection",
+                        "title": "Coverage",
+                    },
+                }
+            ]
+        if level == "subsubsection":
+            return []
+        if level == "paragraph" and (filter or {}).get("section_id", {}).get("$eq") == "section-1":
+            return [
+                {
+                    "id": "para-1",
+                    "score": 0.77,
+                    "metadata": {
+                        "doc_id": "doc-tree",
+                        "node_id": "para-1",
+                        "text": "Coverage details",
+                        "page_start": 2,
+                        "page_end": 2,
+                        "breadcrumb": "Coverage",
+                    },
+                }
+            ]
+        if level == "paragraph":
+            return []
+        raise AssertionError(f"unexpected filter: {filter}")
 
 
 def _meta(doc_id: str) -> DocMeta:
@@ -435,3 +480,23 @@ def test_doc_selection_lexical_fallback_uses_summary_text(monkeypatch):
     assert strong is False
     assert retrieval_query == "cobra enrollment"
     assert retrieval_embedding == [0.1, 0.2]
+
+
+def test_tree_retrieval_marks_partial_failures_as_degraded():
+    debug = {}
+    items = retrieve_tree_for_doc(
+        doc_id="doc-tree",
+        query="coverage details",
+        query_embedding=[0.1, 0.2],
+        settings=replace(settings, tree_node_selection_mode="vector_only", retrieve_top_k=3),
+        vector_store=TreeQueryVectorStore(),
+        top_k=3,
+        debug=debug,
+        tree_dir=None,
+        index_version="ver1",
+    )
+
+    assert items
+    assert debug["degraded"] is True
+    assert debug["tree"]["degraded"] is True
+    assert debug["tree"]["failures"][0]["stage"] == "query_headings"

@@ -118,6 +118,24 @@ def retrieve_tree_for_doc(
     mode = str(getattr(settings, "tree_node_selection_mode", "vector_only") or "vector_only").strip().lower()
     if mode not in {"vector_only", "vector_then_llm", "llm_then_vector"}:
         mode = "vector_only"
+    failures: List[Dict[str, str]] = []
+
+    def record_failure(stage: str, **details: str) -> None:
+        payload = {"stage": stage}
+        for key, value in details.items():
+            cleaned = str(value or "").strip()
+            if cleaned:
+                payload[key] = cleaned
+        failures.append(payload)
+
+    def attach_debug(tree_payload: Dict[str, object]) -> None:
+        if debug is None:
+            return
+        debug["tree"] = tree_payload
+        if failures:
+            debug["degraded"] = True
+            tree_payload["degraded"] = True
+            tree_payload["failures"] = list(failures)
 
     heading_levels = ["section", "subsection", "subsubsection"]
     heading_top_k = max(
@@ -129,20 +147,21 @@ def retrieve_tree_for_doc(
     def query_headings() -> List[Dict]:
         heading_results: List[Dict] = []
         with ThreadPoolExecutor(max_workers=min(6, len(heading_levels))) as executor:
-            futures = [
+            futures = {
                 executor.submit(
                     vector_store.query,
                     vector=query_embedding,
                     top_k=int(heading_top_k),
                     namespace=namespace,
                     filter={"level": {"$eq": level}},
-                )
+                ): level
                 for level in heading_levels
-            ]
+            }
             for future in as_completed(futures):
                 try:
                     heading_results.extend(future.result() or [])
                 except Exception:
+                    record_failure("query_headings", level=futures[future])
                     continue
         return sorted(heading_results, key=lambda x: x.get("score", 0.0), reverse=True)
 
@@ -166,20 +185,21 @@ def retrieve_tree_for_doc(
         if section_ids:
             per_section_top_k = max(limit * 5, 25)
             with ThreadPoolExecutor(max_workers=min(8, len(section_ids))) as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         vector_store.query,
                         vector=query_embedding,
                         top_k=int(per_section_top_k),
                         namespace=namespace,
                         filter={"level": {"$eq": "paragraph"}, "section_id": {"$eq": sid}},
-                    )
+                    ): sid
                     for sid in section_ids
-                ]
+                }
                 for future in as_completed(futures):
                     try:
                         paragraph_results.extend(future.result() or [])
                     except Exception:
+                        record_failure("query_paragraphs_by_section", section_id=futures[future])
                         continue
         else:
             paragraph_results = vector_store.query(
@@ -212,14 +232,15 @@ def retrieve_tree_for_doc(
                 )
             )
 
-        if debug is not None:
-            debug["tree"] = {
+        attach_debug(
+            {
                 "mode": "vector_only",
                 "heading_count": len(heading_results),
                 "section_id_count": len(section_ids),
                 "paragraph_count": len(paragraph_results),
                 "section_ids": section_ids,
             }
+        )
         return items
 
     # Hybrid modes need headings artifact to expand descendants and/or drive LLM selection.
@@ -294,20 +315,21 @@ def retrieve_tree_for_doc(
         per_section_top_k = max(limit * 5, 25)
         results: List[Dict] = []
         with ThreadPoolExecutor(max_workers=min(8, len(section_ids))) as executor:
-            futures = [
+            futures = {
                 executor.submit(
                     vector_store.query,
                     vector=query_embedding,
                     top_k=int(per_section_top_k),
                     namespace=namespace,
                     filter={"level": {"$eq": "paragraph"}, "section_id": {"$eq": sid}},
-                )
+                ): sid
                 for sid in section_ids
-            ]
+            }
             for future in as_completed(futures):
                 try:
                     results.extend(future.result() or [])
                 except Exception:
+                    record_failure("query_paragraphs_by_section", section_id=futures[future])
                     continue
         return results
 
@@ -330,20 +352,21 @@ def retrieve_tree_for_doc(
             # Fall back to per-parent queries if $in isn't supported.
             results: List[Dict] = []
             with ThreadPoolExecutor(max_workers=min(8, len(parent_ids))) as executor:
-                futures = [
+                futures = {
                     executor.submit(
                         vector_store.query,
                         vector=query_embedding,
                         top_k=int(max(10, limit)),
                         namespace=namespace,
                         filter={"level": {"$eq": "paragraph"}, "parent_id": {"$eq": pid}},
-                    )
+                    ): pid
                     for pid in parent_ids[:50]
-                ]
+                }
                 for future in as_completed(futures):
                     try:
                         results.extend(future.result() or [])
                     except Exception:
+                        record_failure("query_paragraphs_by_parent_id", parent_id=futures[future])
                         continue
             return results
 
@@ -444,8 +467,8 @@ def retrieve_tree_for_doc(
             )
         )
 
-    if debug is not None:
-        debug["tree"] = {
+    attach_debug(
+        {
             "mode": mode,
             "candidate_count": len(candidates),
             "selected_node_ids": selected_ids,
@@ -454,5 +477,6 @@ def retrieve_tree_for_doc(
             "fallback_section_ids": used_section_ids,
             "paragraph_count": len(paragraph_results),
         }
+    )
 
     return items
