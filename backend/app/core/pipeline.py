@@ -263,15 +263,10 @@ def select_docs_with_rewrite_retry(
         combined_matches.extend([{**match, "query_variant": "rewrite"} for match in matches2])
         break
 
-    summary_fields_by_doc_id = _load_doc_summary_lexical_fields(
-        metas=metas,
-        settings=settings,
-        vector_store=vector_store,
-    )
+    lexical_queries = [query, rewritten_query] if rewritten_query != query else [query]
     lexical_scores = _build_lexical_doc_scores(
         metas=metas,
-        queries=[query, rewritten_query] if rewritten_query != query else [query],
-        summary_fields_by_doc_id=summary_fields_by_doc_id,
+        queries=lexical_queries,
     )
     selected_ids, strong, info = select_doc_ids_from_matches(
         combined_matches,
@@ -279,6 +274,28 @@ def select_docs_with_rewrite_retry(
         lexical_scores=lexical_scores,
         top_k_fallback=min(4, max(1, int(settings.doc_summary_top_k))),
     )
+
+    # Summary-text lexical fallback is the most expensive doc-selection fallback.
+    # Only load it when the cheaper vector + metadata signals do not already yield a strong winner.
+    if not strong:
+        summary_fields_by_doc_id = _load_doc_summary_lexical_fields(
+            metas=metas,
+            settings=settings,
+            vector_store=vector_store,
+        )
+        if summary_fields_by_doc_id:
+            lexical_scores = _build_lexical_doc_scores(
+                metas=metas,
+                queries=lexical_queries,
+                summary_fields_by_doc_id=summary_fields_by_doc_id,
+            )
+            selected_ids, strong, info = select_doc_ids_from_matches(
+                combined_matches,
+                settings=settings,
+                lexical_scores=lexical_scores,
+                top_k_fallback=min(4, max(1, int(settings.doc_summary_top_k))),
+            )
+
     if debug is not None:
         debug["doc_selection"] = {
             "query_used": query,
