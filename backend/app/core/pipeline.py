@@ -480,6 +480,7 @@ def run_chat(
             _stage_start(on_event, stage_retrieve)
             retrieval_debug_by_doc: Dict[str, Dict[str, Any]] = {}
             failed_doc_ids: List[str] = []
+            degraded_doc_ids: List[str] = []
 
             def _retrieve_one(meta: DocMeta):
                 local_debug: Dict[str, Any] = {}
@@ -491,7 +492,7 @@ def run_chat(
                         settings=settings,
                         vector_store=vector_store,
                         top_k=settings.retrieve_top_k,
-                        debug=local_debug if debug_info else None,
+                        debug=local_debug,
                         tree_dir=tree_dir,
                         index_version=meta.index_version,
                     )
@@ -519,6 +520,9 @@ def run_chat(
                         failed_doc_ids.append(doc_id_hint)
                         continue
                     results_local.extend(items or [])
+                    if local_debug.get("degraded"):
+                        degraded = True
+                        degraded_doc_ids.append(doc_id)
                     if debug_info is not None and local_debug:
                         retrieval_debug_by_doc[doc_id] = local_debug
             _stage_end(on_event, stage_retrieve, int((perf_counter() - t_retrieve) * 1000))
@@ -528,6 +532,14 @@ def run_chat(
                     stage=stage_retrieve,
                     details={
                         "failed_doc_ids": failed_doc_ids,
+                    },
+                )
+            if degraded_doc_ids:
+                _mark_retrieval_degraded(
+                    debug_info=debug_info,
+                    stage=stage_retrieve,
+                    details={
+                        "degraded_doc_ids": sorted(degraded_doc_ids),
                     },
                 )
             if not degraded:

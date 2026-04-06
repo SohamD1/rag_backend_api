@@ -500,3 +500,70 @@ def test_tree_retrieval_marks_partial_failures_as_degraded():
     assert debug["degraded"] is True
     assert debug["tree"]["degraded"] is True
     assert debug["tree"]["failures"][0]["stage"] == "query_headings"
+
+
+def test_run_chat_does_not_cache_partial_tree_degradation(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([replace(_meta("doc-tree"), route="tree")])
+    test_settings = replace(settings, rag_generate_answers_enabled=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc-tree"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+
+    def fake_retrieve_tree_for_doc(**kwargs):
+        kwargs["debug"]["degraded"] = True
+        kwargs["debug"]["tree"] = {"mode": "vector_only", "degraded": True}
+        return [
+            RetrievalItem(
+                source_id="doc-tree:c1",
+                doc_id="doc-tree",
+                filename="doc-tree.pdf",
+                file_url=None,
+                source_url="https://example.com/doc-tree.pdf",
+                text="tree evidence",
+                score=0.9,
+                page_start=1,
+                page_end=1,
+                section_title="Intro",
+                route="tree",
+                vector_namespace="doc-tree::ver1",
+            )
+        ]
+
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", fake_retrieve_tree_for_doc)
+    monkeypatch.setattr(pipeline, "retrieve_standard_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "select_context",
+        lambda **kwargs: (
+            kwargs["items"],
+            [{"header": "doc=doc-tree pages=1-1", "text": "tree evidence"}],
+        ),
+    )
+
+    payload = run_chat(
+        query="show me tree evidence",
+        debug_enabled=True,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc-tree:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["chunks"]
+    assert payload["debug"]["retrieval_degraded"]["stages"][0]["degraded_doc_ids"] == ["doc-tree"]
+    assert retrieval_cache.set_calls == []
+    assert response_cache.set_calls == []
