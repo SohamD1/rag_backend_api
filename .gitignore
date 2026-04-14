@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *.pyd
 .pytest_cache/
+pytest-cache-files-*/
 
 # Virtual environments
 .venv/
@@ -14,6 +15,8 @@ venv/
 # Data/artifacts
 data/
 .tmp/
+backend/.tmp_tests/
+backend/.tmp_tests_runtime/
 
 # Local PDF drop folder (keep README in git, ignore PDFs)
 docs/**/*.pdf

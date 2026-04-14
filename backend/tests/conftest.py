@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import shutil
 import sys
-import tempfile
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from fastapi.testclient import TestClient
@@ -45,9 +45,10 @@ def offline_tokenizer(monkeypatch):
 
 @pytest.fixture
 def work_tmp():
-    base = REPO_ROOT / ".tmp" / "pytest_work"
-    base.mkdir(exist_ok=True)
-    tmp_dir = Path(tempfile.mkdtemp(dir=base))
+    base = BACKEND_DIR / ".tmp_tests_runtime"
+    base.mkdir(parents=True, exist_ok=True)
+    tmp_dir = base / f"work_{uuid4().hex}"
+    tmp_dir.mkdir()
     try:
         yield tmp_dir
     finally:
