@@ -27,66 +27,66 @@ def get_openai_client(settings: Settings) -> OpenAI:
     return _openai_client
 
 
+def _normalize_gpt5_nano_chat_request(kwargs: dict) -> dict:
+    """
+    Normalize chat-completions kwargs for the OpenAI GPT-5 nano path we use in this repo.
+
+    Current behavior:
+    - prefer `max_completion_tokens` over legacy `max_tokens`
+    - omit `temperature`; GPT-5 chat endpoints can reject non-default temperature values
+    - keep `reasoning_effort` when provided, because tree indexing may use it
+    """
+    request_kwargs = dict(kwargs)
+
+    if "max_tokens" in request_kwargs and "max_completion_tokens" not in request_kwargs:
+        request_kwargs["max_completion_tokens"] = request_kwargs.pop("max_tokens")
+
+    request_kwargs.pop("temperature", None)
+    return request_kwargs
+
+
 def chat_completions_create(settings: Settings, **kwargs):
     """
-    Compatibility wrapper for model-specific parameter support.
+    OpenAI chat wrapper normalized for the GPT-5 nano setup used by this repo.
 
-    Some models (e.g. certain GPT-5 variants) reject non-default `temperature`.
-    We prefer deterministic settings where possible, but fall back to the model
-    default when the API rejects a provided temperature value.
+    We proactively shape requests for the GPT-5 chat API instead of carrying a
+    broad compatibility layer for unrelated providers/models.
     """
     client = get_openai_client(settings)
-    request_kwargs = dict(kwargs)
-    removed_temperature = False
-    swapped_to_max_completion_tokens = False
-    swapped_to_max_tokens = False
+    request_kwargs = _normalize_gpt5_nano_chat_request(kwargs)
+    removed_reasoning_effort = False
 
     while True:
         try:
             return client.chat.completions.create(**request_kwargs)
+        except TypeError as exc:
+            msg = str(exc)
+            msg_l = msg.lower()
+
+            # Some client/API combinations reject this kwarg before making the request.
+            if (
+                not removed_reasoning_effort
+                and "reasoning_effort" in request_kwargs
+                and "reasoning_effort" in msg_l
+                and "unexpected keyword argument" in msg_l
+            ):
+                request_kwargs = dict(request_kwargs)
+                request_kwargs.pop("reasoning_effort", None)
+                removed_reasoning_effort = True
+                continue
+            raise
         except BadRequestError as exc:
             msg = str(exc)
             msg_l = msg.lower()
 
-            # Retry 1: strip temperature when model only allows default temperature.
-            if not removed_temperature and "temperature" in request_kwargs and (
-                "temperature' does not support" in msg
-                or "param': 'temperature'" in msg
-                or "only the default (1) value is supported" in msg_l
+            # Some client/API combinations still reject reasoning_effort outright.
+            if not removed_reasoning_effort and "reasoning_effort" in request_kwargs and (
+                "unsupported parameter: 'reasoning_effort'" in msg_l
+                or "param': 'reasoning_effort'" in msg_l
             ):
                 request_kwargs = dict(request_kwargs)
-                request_kwargs.pop("temperature", None)
-                removed_temperature = True
-                continue
-
-            # Retry 2: some models require max_completion_tokens instead of max_tokens.
-            if (
-                not swapped_to_max_completion_tokens
-                and "max_tokens" in request_kwargs
-                and "max_completion_tokens" not in request_kwargs
-                and (
-                    "unsupported parameter: 'max_tokens'" in msg_l
-                    or "param': 'max_tokens'" in msg_l
-                )
-            ):
-                request_kwargs = dict(request_kwargs)
-                request_kwargs["max_completion_tokens"] = request_kwargs.pop("max_tokens")
-                swapped_to_max_completion_tokens = True
-                continue
-
-            # Retry 3: older/alternate providers may reject max_completion_tokens.
-            if (
-                not swapped_to_max_tokens
-                and "max_completion_tokens" in request_kwargs
-                and "max_tokens" not in request_kwargs
-                and (
-                    "unsupported parameter: 'max_completion_tokens'" in msg_l
-                    or "param': 'max_completion_tokens'" in msg_l
-                )
-            ):
-                request_kwargs = dict(request_kwargs)
-                request_kwargs["max_tokens"] = request_kwargs.pop("max_completion_tokens")
-                swapped_to_max_tokens = True
+                request_kwargs.pop("reasoning_effort", None)
+                removed_reasoning_effort = True
                 continue
 
             raise

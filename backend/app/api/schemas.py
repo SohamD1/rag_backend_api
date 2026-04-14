@@ -63,7 +63,6 @@ class RetrievedChunk(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    summary: Optional[str] = None
     citations: List[Citation]
     chunks: Optional[List[RetrievedChunk]] = None
     selected_doc_ids: List[str]

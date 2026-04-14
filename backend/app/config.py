@@ -71,7 +71,7 @@ class Settings:
         cast=lambda v: int(v) if v is not None and v != "" else None,
     )
     openai_generation_model: str = _get_env(
-        "OPENAI_GENERATION_MODEL", "gpt-4o-mini"
+        "OPENAI_GENERATION_MODEL", "gpt-5.4-nano-2026-03-17"
     )
     openai_tree_model: str = _get_env(
         "OPENAI_TREE_MODEL", "gpt-5.4-nano-2026-03-17"
@@ -79,7 +79,9 @@ class Settings:
     openai_tree_reasoning_effort: str = _get_env(
         "OPENAI_TREE_REASONING_EFFORT", "high"
     )
-    openai_tree_search_model: str = _get_env("OPENAI_TREE_SEARCH_MODEL", "gpt-4o-mini")
+    openai_tree_search_model: str = _get_env(
+        "OPENAI_TREE_SEARCH_MODEL", "gpt-5.4-nano-2026-03-17"
+    )
     openai_rewrite_model: str = _get_env("OPENAI_REWRITE_MODEL", "gpt-4o-mini")
 
     # Pinecone
