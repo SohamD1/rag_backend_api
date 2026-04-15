@@ -20,7 +20,7 @@ from app.core.doc_summaries import (
     query_doc_summaries,
     select_doc_ids_from_matches,
 )
-from app.core.generation import generate_answer_and_summary
+from app.core.generation import generate_answer
 from app.core.retrieval import (
     RetrievalItem,
     retrieval_item_from_dict,
@@ -34,6 +34,55 @@ from app.storage.registry import DocMeta, DocRegistry
 
 
 logger = logging.getLogger(__name__)
+
+
+_STAGE_LABELS: Dict[str, str] = {
+    "registry_lookup": "Loading documents",
+    "response_cache_key": "Checking response cache",
+    "response_cache": "Using cached response",
+    "embed_query": "Embedding query",
+    "doc_selection": "Routing documents",
+    "retrieve": "Retrieving evidence",
+    "retrieve_cache": "Using cached retrieval",
+    "rerank_fetch": "Loading retrieval details",
+    "rerank": "Ranking evidence",
+    "rerank_skip": "Skipping rerank",
+    "rewrite_query": "Rewriting query",
+    "doc_selection_rewrite": "Retrying document routing",
+    "rewrite_retrieve": "Retrieving evidence",
+    "rewrite_retrieve_cache": "Using cached retrieval",
+    "rewrite_rerank_fetch": "Loading retrieval details",
+    "rewrite_rerank": "Ranking evidence",
+    "rewrite_rerank_skip": "Skipping rerank",
+    "context_select": "Packing context",
+    "generate": "Writing answer",
+}
+
+
+def _humanize_stage(stage: str) -> str:
+    key = str(stage or "").strip()
+    if not key:
+        return "Working"
+    label = _STAGE_LABELS.get(key)
+    if label:
+        return label
+    return key.replace("_", " ").strip().title()
+
+
+def _with_stage_metadata(payload: Dict[str, object]) -> Dict[str, object]:
+    if "stage" not in payload:
+        return payload
+    stage = str(payload.get("stage") or "").strip()
+    enriched = dict(payload)
+    enriched.setdefault("label", _humanize_stage(stage))
+    if "message" not in enriched:
+        if enriched.get("cache_hit"):
+            enriched["message"] = f"{enriched['label']}."
+        elif enriched.get("skipped"):
+            enriched["message"] = f"{enriched['label']}."
+        else:
+            enriched["message"] = enriched["label"]
+    return enriched
 
 
 def _dump_model(obj: Any) -> Any:
@@ -51,7 +100,7 @@ def _emit(
 ) -> None:
     if on_event is None:
         return
-    on_event({"event": event, "data": payload})
+    on_event({"event": event, "data": _with_stage_metadata(payload)})
 
 
 def _stage_start(on_event: Optional[Callable[[Dict[str, object]], None]], stage: str) -> None:
@@ -746,26 +795,6 @@ def run_chat(
 
     generation_enabled = bool(getattr(settings, "rag_generate_answers_enabled", True))
 
-    if generation_enabled and (
-        not reranked or reranked[0].score < settings.low_confidence_threshold
-    ):
-        payload = {
-            "answer": (
-                "I could not find strong evidence in the uploaded documents. "
-                "Please provide a more specific question or a keyword unique to the document you mean."
-            ),
-            "summary": None,
-            "citations": [],
-            "chunks": None,
-            "selected_doc_ids": [m.doc_id for m in selected_metas],
-            "route": _route_label(selected_metas),
-            "used_context_count": 0,
-            "debug": debug_info,
-        }
-        if not retrieval_degraded:
-            response_cache.set(response_key, payload)
-        return payload
-
     # Context budget selection for either retrieval-only or grounded generation.
     t_context = perf_counter()
     _stage_start(on_event, "context_select")
@@ -794,7 +823,6 @@ def run_chat(
         )
         payload = {
             "answer": "",
-            "summary": None,
             "citations": citations,
             "chunks": _build_chunk_payload(selected),
             "selected_doc_ids": [m.doc_id for m in selected_metas],
@@ -815,17 +843,17 @@ def run_chat(
 
     t_generate = perf_counter()
     _stage_start(on_event, "generate")
-    answer, summary = generate_answer_and_summary(
+    answer = generate_answer(
         query=query,  # answer should respond to the user's original question
         context_items=context_items,
         settings=settings,
     )
     _stage_end(on_event, "generate", int((perf_counter() - t_generate) * 1000))
+    citations_for_answer = citations if "[" in answer and "]" in answer else []
 
     payload = {
         "answer": answer,
-        "summary": summary or None,
-        "citations": citations,
+        "citations": citations_for_answer,
         "chunks": None,
         "selected_doc_ids": [m.doc_id for m in selected_metas],
         "route": _route_label(selected_metas),
