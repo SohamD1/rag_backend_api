@@ -335,6 +335,71 @@ def test_clean_retrieval_writes_caches(monkeypatch):
     assert response_cache.set_calls
 
 
+def test_run_chat_hides_selected_doc_ids_without_debug(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(settings, rag_generate_answers_enabled=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename="doc1.pdf",
+                file_url=None,
+                source_url="https://example.com/doc1.pdf",
+                text="useful evidence",
+                score=0.9,
+                page_start=1,
+                page_end=1,
+                section_title="Intro",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "select_context",
+        lambda **kwargs: (
+            kwargs["items"],
+            [{"header": "doc=doc1 pages=1-1", "text": "useful evidence"}],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "generate_answer", lambda **kwargs: "")
+
+    payload = run_chat(
+        query="what is useful",
+        debug_enabled=False,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["chunks"]
+    assert payload["selected_doc_ids"] is None
+    assert payload["debug"] is None
+
+
 def test_doc_selection_aggregates_summary_kinds_and_initial_rewrite(monkeypatch):
     from app.core import pipeline
 

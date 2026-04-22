@@ -65,7 +65,7 @@ class ChatResponse(BaseModel):
     answer: str
     citations: List[Citation]
     chunks: Optional[List[RetrievedChunk]] = None
-    selected_doc_ids: List[str]
+    selected_doc_ids: Optional[List[str]] = None
     route: str
     used_context_count: int
     debug: Optional[Dict[str, Any]] = None
