@@ -263,7 +263,11 @@ def test_degraded_retrieval_does_not_write_caches(monkeypatch):
         tree_dir=None,
     )
 
+    assert payload["query"] == "what is useful"
     assert payload["chunks"]
+    assert "file_url" not in payload["chunks"][0]
+    assert "answer" not in payload
+    assert "citations" not in payload
     assert payload["debug"]["retrieval_degraded"]["stages"][0]["stage"] == "retrieve"
     assert retrieval_cache.set_calls == []
     assert response_cache.set_calls == []
@@ -330,12 +334,15 @@ def test_clean_retrieval_writes_caches(monkeypatch):
         tree_dir=None,
     )
 
+    assert payload["query"] == "what is useful"
     assert payload["chunks"]
+    assert "answer" not in payload
+    assert "citations" not in payload
     assert retrieval_cache.set_calls
     assert response_cache.set_calls
 
 
-def test_run_chat_hides_selected_doc_ids_without_debug(monkeypatch):
+def test_run_chat_returns_retrieval_payload_without_debug(monkeypatch):
     from app.core import pipeline
 
     retrieval_cache = RecordingCache()
@@ -395,8 +402,11 @@ def test_run_chat_hides_selected_doc_ids_without_debug(monkeypatch):
         tree_dir=None,
     )
 
+    assert payload["query"] == "what is useful"
     assert payload["chunks"]
-    assert payload["selected_doc_ids"] is None
+    assert payload["selected_doc_ids"] == ["doc1"]
+    assert "answer" not in payload
+    assert "citations" not in payload
     assert payload["debug"] is None
 
 
@@ -1171,6 +1181,7 @@ def test_run_chat_returns_chunk_level_citations_filtered_to_cited_docs(monkeypat
         ("doc1:c2", 4, 4),
         ("doc2:c1", 8, 9),
     }
+    assert all("file_url" not in citation for citation in payload["citations"])
 
 
 def test_run_chat_review_pass_can_fix_instruction_following(monkeypatch):

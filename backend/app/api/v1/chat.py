@@ -26,7 +26,7 @@ retrieval_cache = JsonCache(CACHE_DIR / "retrieval")
 response_cache = JsonCache(CACHE_DIR / "response")
 
 
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, response_model_exclude_none=True)
 def chat(req: ChatRequest):
     if settings.log_payloads or settings.rag_debug or bool(req.debug):
         logger.info("chat_request %s", {"query": req.query, "debug": bool(req.debug)})

@@ -39,7 +39,6 @@ class ChatRequest(BaseModel):
 class Citation(BaseModel):
     doc_id: str
     filename: Optional[str] = None
-    file_url: Optional[str] = None
     source_url: str
     source_id: str
     page_start: int
@@ -51,7 +50,6 @@ class RetrievedChunk(BaseModel):
     source_id: str
     doc_id: str
     filename: Optional[str] = None
-    file_url: Optional[str] = None
     source_url: Optional[str] = None
     text: str
     score: float
@@ -62,10 +60,11 @@ class RetrievedChunk(BaseModel):
 
 
 class ChatResponse(BaseModel):
-    answer: str
-    citations: List[Citation]
+    query: Optional[str] = None
+    answer: Optional[str] = None
+    citations: Optional[List[Citation]] = None
     chunks: Optional[List[RetrievedChunk]] = None
-    selected_doc_ids: Optional[List[str]] = None
+    selected_doc_ids: List[str]
     route: str
     used_context_count: int
     debug: Optional[Dict[str, Any]] = None

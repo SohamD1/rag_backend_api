@@ -305,7 +305,6 @@ def _build_chunk_citations(
             {
                 "doc_id": doc_id,
                 "filename": item.filename,
-                "file_url": item.file_url,
                 "source_url": item.source_url or source_url_by_doc_id.get(doc_id, ""),
                 "source_id": source_id or f"{doc_id}:citation:{per_doc_count.get(doc_id, 0) + 1}",
                 "page_start": int(item.page_start),
@@ -437,7 +436,6 @@ def _build_chunk_payload(items: List[RetrievalItem]) -> List[Dict[str, Any]]:
                 "source_id": item.source_id,
                 "doc_id": item.doc_id,
                 "filename": item.filename,
-                "file_url": item.file_url,
                 "source_url": item.source_url,
                 "text": item.text,
                 "score": float(item.score),
@@ -1099,11 +1097,6 @@ def run_chat(
 
     source_url_by_doc_id = {m.doc_id: getattr(m, "source_url", "") for m in selected_metas}
 
-    citations = _build_chunk_citations(
-        items=selected,
-        source_url_by_doc_id=source_url_by_doc_id,
-    )
-
     if not generation_enabled:
         _emit(
             on_event,
@@ -1115,10 +1108,9 @@ def run_chat(
             },
         )
         payload = {
-            "answer": "",
-            "citations": citations,
+            "query": query,
             "chunks": _build_chunk_payload(selected),
-            "selected_doc_ids": [m.doc_id for m in selected_metas] if debug_enabled else None,
+            "selected_doc_ids": [m.doc_id for m in selected_metas],
             "route": _route_label(selected_metas),
             "used_context_count": len(selected),
             "debug": debug_info,
@@ -1133,6 +1125,11 @@ def run_chat(
             int((perf_counter() - started) * 1000),
         )
         return payload
+
+    citations = _build_chunk_citations(
+        items=selected,
+        source_url_by_doc_id=source_url_by_doc_id,
+    )
 
     t_generate = perf_counter()
     _stage_start(on_event, "generate")
@@ -1159,7 +1156,7 @@ def run_chat(
         "answer": answer,
         "citations": citations_for_answer,
         "chunks": None,
-        "selected_doc_ids": [m.doc_id for m in selected_metas] if debug_enabled else None,
+        "selected_doc_ids": [m.doc_id for m in selected_metas],
         "route": _route_label(selected_metas),
         "used_context_count": len(selected),
         "debug": debug_info,
