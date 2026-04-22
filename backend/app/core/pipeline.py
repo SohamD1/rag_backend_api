@@ -389,6 +389,54 @@ def select_docs_with_rewrite_retry(
     return selected_ids[:4], False, query, query_embedding
 
 
+def _build_broadened_doc_candidates(
+    *,
+    metas: List[DocMeta],
+    already_selected_doc_ids: List[str],
+    query: str,
+    limit: int,
+) -> List[DocMeta]:
+    limit = max(1, int(limit))
+    meta_by_id = {m.doc_id: m for m in metas}
+    selected: List[DocMeta] = [
+        meta_by_id[doc_id]
+        for doc_id in already_selected_doc_ids
+        if doc_id in meta_by_id
+    ]
+    if len(selected) >= limit:
+        return selected[:limit]
+
+    selected_ids = {m.doc_id for m in selected}
+    if len(metas) <= 4:
+        remaining = [
+            meta
+            for meta in sorted(metas, key=lambda m: m.filename.lower())
+            if meta.doc_id not in selected_ids
+        ]
+        return [*selected, *remaining][:limit]
+
+    lexical_scores = _build_lexical_doc_scores(metas=metas, queries=[query])
+    backup_ids: List[str] = [
+        doc_id
+        for doc_id, score in sorted(
+            lexical_scores.items(),
+            key=lambda item: (item[1], item[0]),
+            reverse=True,
+        )
+        if score > 0 and doc_id not in selected_ids
+    ]
+    if len(backup_ids) < limit:
+        for meta in _sort_metas_for_fallback(metas):
+            if meta.doc_id in selected_ids or meta.doc_id in backup_ids:
+                continue
+            backup_ids.append(meta.doc_id)
+            if len(selected) + len(backup_ids) >= limit:
+                break
+
+    backups = [meta_by_id[doc_id] for doc_id in backup_ids if doc_id in meta_by_id]
+    return [*selected, *backups][:limit]
+
+
 def run_chat(
     *,
     query: str,
@@ -791,6 +839,49 @@ def run_chat(
                 "applied": used_rewrite_retry,
                 "retry_degraded": retry_degraded,
                 "reused_initial_rewrite": reused_initial_rewrite,
+            }
+
+    if reranked and reranked[0].score < settings.low_confidence_threshold:
+        broadened_limit = min(
+            max(2, len(selected_metas) + 1),
+            max(2, min(4, len(metas))),
+        )
+        broadened_metas = _build_broadened_doc_candidates(
+            metas=metas,
+            already_selected_doc_ids=[m.doc_id for m in selected_metas],
+            query=query,
+            limit=broadened_limit,
+        )
+        broadened_doc_ids = [m.doc_id for m in broadened_metas]
+        should_retry_broader = (
+            len(broadened_doc_ids) > len(selected_metas)
+            and broadened_doc_ids != [m.doc_id for m in selected_metas]
+        )
+        broadened_reranked: List[RetrievalItem] = []
+        broadened_degraded = False
+        if should_retry_broader:
+            broadened_reranked, broadened_degraded = _retrieve_and_rerank(
+                selected_metas_local=broadened_metas,
+                retrieval_query_local=query,
+                retrieval_embedding_local=query_embedding,
+                strong_doc_match=False,
+                stage_prefix="broad_",
+            )
+
+        base_top = reranked[0].score if reranked else -1.0
+        broader_top = broadened_reranked[0].score if broadened_reranked else -1.0
+        used_broader_retry = bool(broadened_reranked and broader_top > base_top)
+        if used_broader_retry:
+            selected_metas = broadened_metas
+            reranked = broadened_reranked
+            retrieval_degraded = broadened_degraded
+        if debug_info is not None:
+            debug_info["broad_retrieval_retry"] = {
+                "candidate_doc_ids": broadened_doc_ids,
+                "base_top_score": base_top,
+                "retry_top_score": broader_top,
+                "applied": used_broader_retry,
+                "retry_degraded": broadened_degraded,
             }
 
     generation_enabled = bool(getattr(settings, "rag_generate_answers_enabled", True))

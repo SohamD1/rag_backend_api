@@ -3,10 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.config import Settings
+from app.core.doc_summaries import lexical_doc_score
 from app.core.vector_namespace import vector_namespace
 from app.core.tree_search import select_tree_nodes_with_llm
 from app.services.tree_index import load_headings
@@ -61,6 +62,150 @@ def retrieval_item_from_dict(payload: Dict) -> RetrievalItem:
         route=str(payload.get("route", "standard")),
         vector_namespace=payload.get("vector_namespace"),
     )
+
+
+_TREE_LEVEL_SPECIFICITY: Dict[str, int] = {
+    "section": 1,
+    "subsection": 2,
+    "subsubsection": 3,
+    "paragraph": 4,
+}
+
+
+def _tree_candidate_lexical_score(query: str, candidate: Dict[str, Any]) -> float:
+    return lexical_doc_score(
+        query,
+        [
+            str(candidate.get("title") or ""),
+            str(candidate.get("breadcrumb") or ""),
+            str(candidate.get("summary") or ""),
+        ],
+    )
+
+
+def _tree_candidate_rank(query: str, candidate: Dict[str, Any]) -> tuple[float, float, float, int]:
+    lexical = _tree_candidate_lexical_score(query, candidate)
+    vector_score = float(candidate.get("score", 0.0) or 0.0)
+    level = str(candidate.get("level") or "")
+    specificity = _TREE_LEVEL_SPECIFICITY.get(level, 0)
+    combined = vector_score + lexical + (0.02 * specificity)
+    return combined, lexical, vector_score, specificity
+
+
+def _sort_tree_candidates(query: str, candidates: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return sorted(
+        candidates,
+        key=lambda candidate: _tree_candidate_rank(query, candidate),
+        reverse=True,
+    )
+
+
+def _selected_descendants(selected_ids: List[str], headings: Dict[str, Dict]) -> set[str]:
+    selected_set = {str(node_id or "").strip() for node_id in selected_ids if str(node_id or "").strip()}
+    descendants: set[str] = set()
+    if not selected_set or not headings:
+        return descendants
+
+    for node_id in selected_set:
+        stack = [str(child or "").strip() for child in (headings.get(node_id, {}).get("child_ids") or [])]
+        seen: set[str] = set()
+        while stack:
+            child_id = stack.pop()
+            if not child_id or child_id in seen:
+                continue
+            seen.add(child_id)
+            descendants.add(child_id)
+            stack.extend(
+                str(grandchild or "").strip()
+                for grandchild in (headings.get(child_id, {}).get("child_ids") or [])
+            )
+    return descendants
+
+
+def _prune_selected_tree_nodes(selected_ids: List[str], headings: Dict[str, Dict]) -> List[str]:
+    if not selected_ids:
+        return []
+    descendants = _selected_descendants(selected_ids, headings)
+    pruned = [node_id for node_id in selected_ids if node_id not in descendants]
+    return pruned or list(selected_ids)
+
+
+def _build_tree_node_items(
+    *,
+    query: str,
+    node_ids: List[str],
+    candidate_by_id: Dict[str, Dict[str, Any]],
+    headings: Dict[str, Dict],
+    doc_id: str,
+    namespace: str,
+    breadcrumb_for,
+) -> List[RetrievalItem]:
+    items: List[RetrievalItem] = []
+    ordered_node_ids = _prune_selected_tree_nodes(node_ids, headings)
+
+    for node_id in ordered_node_ids:
+        candidate = dict(candidate_by_id.get(node_id) or {})
+        heading = dict(headings.get(node_id) or {})
+        title = str(candidate.get("title") or heading.get("title") or "").strip()
+        breadcrumb = str(
+            candidate.get("breadcrumb")
+            or heading.get("breadcrumb")
+            or breadcrumb_for(node_id)
+            or title
+        ).strip()
+        text = str(
+            candidate.get("summary")
+            or heading.get("summary")
+            or heading.get("text_span")
+            or ""
+        ).strip()
+        if not text:
+            continue
+
+        level = str(candidate.get("level") or heading.get("level") or "")
+        combined, lexical, vector_score, specificity = _tree_candidate_rank(
+            query,
+            {
+                "title": title,
+                "breadcrumb": breadcrumb,
+                "summary": text,
+                "score": candidate.get("score", 0.0),
+                "level": level,
+            },
+        )
+
+        items.append(
+            RetrievalItem(
+                source_id=str(node_id),
+                doc_id=str(candidate.get("doc_id") or heading.get("doc_id") or doc_id),
+                filename=candidate.get("filename"),
+                file_url=candidate.get("file_url"),
+                source_url=candidate.get("source_url"),
+                text=text,
+                score=max(combined, lexical, vector_score) + (0.02 * specificity),
+                page_start=int(candidate.get("page_start") or heading.get("page_start") or 1),
+                page_end=int(candidate.get("page_end") or heading.get("page_end") or 1),
+                section_title=breadcrumb or title or None,
+                route="tree",
+                vector_namespace=namespace,
+            )
+        )
+
+    return items
+
+
+def _merge_tree_items(
+    node_items: List[RetrievalItem],
+    paragraph_items: List[RetrievalItem],
+) -> List[RetrievalItem]:
+    merged: Dict[str, RetrievalItem] = {}
+    for item in [*node_items, *paragraph_items]:
+        if not item.source_id:
+            continue
+        existing = merged.get(item.source_id)
+        if existing is None or float(item.score) > float(existing.score):
+            merged[item.source_id] = item
+    return sorted(merged.values(), key=lambda item: float(item.score), reverse=True)
 
 
 def retrieve_standard_for_doc(
@@ -163,15 +308,45 @@ def retrieve_tree_for_doc(
                 except Exception:
                     record_failure("query_headings", level=futures[future])
                     continue
-        return sorted(heading_results, key=lambda x: x.get("score", 0.0), reverse=True)
+        return _sort_tree_candidates(
+            query,
+            [
+                {
+                    **match,
+                    "score": float(match.get("score", 0.0)),
+                    "title": str((match.get("metadata", {}) or {}).get("title") or ""),
+                    "breadcrumb": str((match.get("metadata", {}) or {}).get("breadcrumb") or ""),
+                    "summary": str((match.get("metadata", {}) or {}).get("summary") or ""),
+                    "level": str((match.get("metadata", {}) or {}).get("level") or ""),
+                }
+                for match in heading_results
+            ],
+        )
 
     def vector_only() -> List[RetrievalItem]:
         heading_results = query_headings()
+        candidate_by_id: Dict[str, Dict[str, Any]] = {}
 
         section_ids: List[str] = []
         for match in heading_results:
             meta = match.get("metadata", {}) or {}
             section_id = meta.get("section_id") or meta.get("node_id") or match.get("id")
+            node_id = str(meta.get("node_id") or match.get("id") or "").strip()
+            if node_id:
+                candidate_by_id[node_id] = {
+                    "node_id": node_id,
+                    "doc_id": str(meta.get("doc_id") or doc_id),
+                    "filename": meta.get("filename"),
+                    "file_url": meta.get("file_url"),
+                    "source_url": meta.get("source_url"),
+                    "level": str(meta.get("level") or ""),
+                    "title": str(meta.get("title") or ""),
+                    "breadcrumb": str(meta.get("breadcrumb") or ""),
+                    "page_start": meta.get("page_start"),
+                    "page_end": meta.get("page_end"),
+                    "summary": str(meta.get("summary") or ""),
+                    "score": float(match.get("score", 0.0)),
+                }
             if not section_id:
                 continue
             section_id = str(section_id)
@@ -211,11 +386,11 @@ def retrieve_tree_for_doc(
 
         paragraph_results = sorted(paragraph_results, key=lambda x: x.get("score", 0.0), reverse=True)[:limit]
 
-        items: List[RetrievalItem] = []
+        paragraph_items: List[RetrievalItem] = []
         for match in paragraph_results:
             meta = match.get("metadata", {}) or {}
             node_id = meta.get("node_id") or match.get("id") or ""
-            items.append(
+            paragraph_items.append(
                 RetrievalItem(
                     source_id=str(node_id),
                     doc_id=str(meta.get("doc_id") or doc_id),
@@ -231,6 +406,20 @@ def retrieve_tree_for_doc(
                     vector_namespace=namespace,
                 )
             )
+
+        node_items = _build_tree_node_items(
+            query=query,
+            node_ids=[
+                str((match.get("metadata", {}) or {}).get("node_id") or match.get("id") or "").strip()
+                for match in heading_results[: min(4, len(heading_results))]
+            ],
+            candidate_by_id=candidate_by_id,
+            headings=headings,
+            doc_id=doc_id,
+            namespace=namespace,
+            breadcrumb_for=breadcrumb_for,
+        )
+        items = _merge_tree_items(node_items, paragraph_items)
 
         attach_debug(
             {
@@ -400,7 +589,7 @@ def retrieve_tree_for_doc(
             prev = by_id.get(nid)
             if prev is None or cand["score"] > float(prev.get("score", 0.0)):
                 by_id[nid] = cand
-        candidates = sorted(by_id.values(), key=lambda x: float(x.get("score", 0.0)), reverse=True)
+        candidates = _sort_tree_candidates(query, list(by_id.values()))
         candidates = candidates[: max(1, int(getattr(settings, "tree_node_selection_candidate_k", 24)))]
     elif mode == "llm_then_vector":
         if not headings:
@@ -432,6 +621,7 @@ def retrieve_tree_for_doc(
                     "summary": str(n.get("summary") or ""),
                 }
             )
+        candidates = _sort_tree_candidates(query, candidates)
 
     selected_ids, thinking = llm_select_from_candidates(candidates)
     if not selected_ids:
@@ -446,11 +636,11 @@ def retrieve_tree_for_doc(
 
     paragraph_results = sorted(paragraph_results, key=lambda x: x.get("score", 0.0), reverse=True)[:limit]
 
-    items: List[RetrievalItem] = []
+    paragraph_items: List[RetrievalItem] = []
     for match in paragraph_results:
         meta = match.get("metadata", {}) or {}
         node_id = meta.get("node_id") or match.get("id") or ""
-        items.append(
+        paragraph_items.append(
             RetrievalItem(
                 source_id=str(node_id),
                 doc_id=str(meta.get("doc_id") or doc_id),
@@ -466,6 +656,18 @@ def retrieve_tree_for_doc(
                 vector_namespace=namespace,
             )
         )
+
+    candidate_by_id = {str(candidate.get("node_id") or ""): candidate for candidate in candidates}
+    node_items = _build_tree_node_items(
+        query=query,
+        node_ids=selected_ids,
+        candidate_by_id=candidate_by_id,
+        headings=headings,
+        doc_id=doc_id,
+        namespace=namespace,
+        breadcrumb_for=breadcrumb_for,
+    )
+    items = _merge_tree_items(node_items, paragraph_items)
 
     attach_debug(
         {

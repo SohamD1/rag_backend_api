@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 
 from app.config import settings
+from app.core.doc_summaries import select_doc_ids_from_matches
 from app.core.pipeline import run_chat, select_docs_with_rewrite_retry
 from app.core.retrieval import RetrievalItem, retrieve_tree_for_doc
 from app.storage.registry import DocMeta
@@ -110,6 +111,79 @@ class TreeQueryVectorStore:
         raise AssertionError(f"unexpected filter: {filter}")
 
 
+class TreeDefinitionBiasVectorStore:
+    def query(self, *, vector, top_k, namespace, filter=None):
+        level = (filter or {}).get("level", {}).get("$eq")
+        if level == "section":
+            return [
+                {
+                    "id": "sec-law",
+                    "score": 0.86,
+                    "metadata": {
+                        "doc_id": "doc-tree",
+                        "node_id": "sec-law",
+                        "section_id": "sec-law",
+                        "level": "section",
+                        "title": "Current state of the law",
+                        "summary": "This section explains the legal framework and current law.",
+                        "page_start": 6,
+                        "page_end": 8,
+                    },
+                }
+            ]
+        if level == "subsection":
+            return [
+                {
+                    "id": "sub-definition",
+                    "score": 0.72,
+                    "metadata": {
+                        "doc_id": "doc-tree",
+                        "node_id": "sub-definition",
+                        "section_id": "sec-overview",
+                        "level": "subsection",
+                        "title": "What are widgets?",
+                        "summary": "Widgets fall into two categories and this section lists examples.",
+                        "page_start": 3,
+                        "page_end": 4,
+                    },
+                }
+            ]
+        if level == "subsubsection":
+            return []
+        if level == "paragraph":
+            return []
+        raise AssertionError(f"unexpected filter: {filter}")
+
+
+class TreeNoParagraphsVectorStore:
+    def query(self, *, vector, top_k, namespace, filter=None):
+        level = (filter or {}).get("level", {}).get("$eq")
+        if level == "section":
+            return []
+        if level == "subsection":
+            return [
+                {
+                    "id": "sub-definition",
+                    "score": 0.74,
+                    "metadata": {
+                        "doc_id": "doc-tree",
+                        "node_id": "sub-definition",
+                        "section_id": "sec-overview",
+                        "level": "subsection",
+                        "title": "What are widgets?",
+                        "summary": "Widgets fall into two categories: local and hosted.",
+                        "page_start": 3,
+                        "page_end": 4,
+                    },
+                }
+            ]
+        if level == "subsubsection":
+            return []
+        if level == "paragraph":
+            return []
+        raise AssertionError(f"unexpected filter: {filter}")
+
+
 def _meta(doc_id: str) -> DocMeta:
     return DocMeta(
         doc_id=doc_id,
@@ -176,7 +250,7 @@ def test_degraded_retrieval_does_not_write_caches(monkeypatch):
             [{"header": "doc=doc1 pages=1-1", "text": "useful evidence"}],
         ),
     )
-    monkeypatch.setattr(pipeline, "generate_answer_and_summary", lambda **kwargs: ("", None))
+    monkeypatch.setattr(pipeline, "generate_answer", lambda **kwargs: "")
 
     payload = run_chat(
         query="what is useful",
@@ -242,7 +316,7 @@ def test_clean_retrieval_writes_caches(monkeypatch):
             [{"header": "doc=doc1 pages=1-1", "text": "useful evidence"}],
         ),
     )
-    monkeypatch.setattr(pipeline, "generate_answer_and_summary", lambda **kwargs: ("", None))
+    monkeypatch.setattr(pipeline, "generate_answer", lambda **kwargs: "")
 
     vector_store = FetchingVectorStore({"doc1:c1": [0.1, 0.2]})
     payload = run_chat(
@@ -403,6 +477,41 @@ def test_doc_selection_can_win_on_keywords_signal(monkeypatch):
     assert retrieval_embedding == [0.1, 0.2]
 
 
+def test_doc_selection_does_not_mark_aggregate_only_win_as_strong():
+    selected_ids, strong, debug = select_doc_ids_from_matches(
+        [
+            {
+                "id": "doc-digital:profile",
+                "score": 0.380580872,
+                "metadata": {"doc_id": "doc-digital", "summary_kind": "profile"},
+            },
+            {
+                "id": "doc-digital:headings",
+                "score": 0.372947812,
+                "metadata": {"doc_id": "doc-digital", "summary_kind": "headings"},
+            },
+            {
+                "id": "doc-tax:profile",
+                "score": 0.385362387,
+                "metadata": {"doc_id": "doc-tax", "summary_kind": "profile"},
+            },
+            {
+                "id": "doc-tax:headings",
+                "score": 0.240419984,
+                "metadata": {"doc_id": "doc-tax", "summary_kind": "headings"},
+            },
+        ],
+        settings=settings,
+        top_k_fallback=3,
+        lexical_scores={},
+    )
+
+    assert strong is False
+    assert selected_ids[:2] == ["doc-digital", "doc-tax"]
+    assert debug["ranked"][0]["doc_id"] == "doc-digital"
+    assert debug["ranked"][0]["best_vector_score"] < debug["ranked"][1]["best_vector_score"]
+
+
 def test_doc_selection_falls_back_to_lexical_metadata(monkeypatch):
     from app.core import pipeline
 
@@ -500,6 +609,59 @@ def test_tree_retrieval_marks_partial_failures_as_degraded():
     assert debug["degraded"] is True
     assert debug["tree"]["degraded"] is True
     assert debug["tree"]["failures"][0]["stage"] == "query_headings"
+
+
+def test_tree_retrieval_prioritizes_query_matching_candidates_for_llm(monkeypatch):
+    captured = {}
+
+    def fake_select_tree_nodes_with_llm(*, query, candidates, settings, top_n):
+        captured["candidates"] = candidates
+        return ["sub-definition"], "picked exact definition node"
+
+    monkeypatch.setattr(
+        "app.core.retrieval.select_tree_nodes_with_llm",
+        fake_select_tree_nodes_with_llm,
+    )
+
+    items = retrieve_tree_for_doc(
+        doc_id="doc-tree",
+        query="widget definition categories examples",
+        query_embedding=[0.1, 0.2],
+        settings=replace(settings, tree_node_selection_mode="vector_then_llm", retrieve_top_k=3),
+        vector_store=TreeDefinitionBiasVectorStore(),
+        top_k=3,
+        debug={},
+        tree_dir=None,
+        index_version="ver1",
+    )
+
+    assert captured["candidates"][0]["node_id"] == "sub-definition"
+    assert items
+    assert items[0].text.startswith("Widgets fall into two categories")
+
+
+def test_tree_retrieval_includes_selected_node_summary_when_paragraphs_miss(monkeypatch):
+    monkeypatch.setattr(
+        "app.core.retrieval.select_tree_nodes_with_llm",
+        lambda **kwargs: (["sub-definition"], "picked exact definition node"),
+    )
+
+    items = retrieve_tree_for_doc(
+        doc_id="doc-tree",
+        query="widget definition",
+        query_embedding=[0.1, 0.2],
+        settings=replace(settings, tree_node_selection_mode="vector_then_llm", retrieve_top_k=3),
+        vector_store=TreeNoParagraphsVectorStore(),
+        top_k=3,
+        debug={},
+        tree_dir=None,
+        index_version="ver1",
+    )
+
+    assert items
+    assert items[0].source_id == "sub-definition"
+    assert "two categories" in items[0].text
+    assert items[0].section_title == "What are widgets?"
 
 
 def test_run_chat_does_not_cache_partial_tree_degradation(monkeypatch):
@@ -657,3 +819,101 @@ def test_run_chat_reuses_initial_rewrite_for_low_confidence_retry(monkeypatch):
     assert payload["chunks"]
     assert rewrite_calls == ["what are the benefits"]
     assert payload["debug"]["rewrite_retry"]["reused_initial_rewrite"] is True
+
+
+def test_run_chat_broadens_doc_scope_after_low_confidence_retrieval(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1"), _meta("doc2"), _meta("doc3")])
+    test_settings = replace(
+        settings,
+        rag_generate_answers_enabled=False,
+        doc_rewrite_max_attempts=0,
+        low_confidence_threshold=0.35,
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], True, kwargs["query"], kwargs["query_embedding"]),
+    )
+
+    def fake_retrieve_standard_for_doc(**kwargs):
+        doc_id = kwargs["doc_id"]
+        if doc_id == "doc1":
+            return [
+                RetrievalItem(
+                    source_id="doc1:c1",
+                    doc_id="doc1",
+                    filename="doc1.pdf",
+                    file_url=None,
+                    source_url="https://example.com/doc1.pdf",
+                    text="weak evidence",
+                    score=0.2,
+                    page_start=1,
+                    page_end=1,
+                    section_title="Intro",
+                    route="standard",
+                    vector_namespace="doc1::ver1",
+                )
+            ]
+        if doc_id == "doc2":
+            return [
+                RetrievalItem(
+                    source_id="doc2:c1",
+                    doc_id="doc2",
+                    filename="doc2.pdf",
+                    file_url=None,
+                    source_url="https://example.com/doc2.pdf",
+                    text="strong evidence",
+                    score=0.62,
+                    page_start=2,
+                    page_end=2,
+                    section_title="Coverage",
+                    route="standard",
+                    vector_namespace="doc2::ver1",
+                )
+            ]
+        return []
+
+    monkeypatch.setattr(pipeline, "retrieve_standard_for_doc", fake_retrieve_standard_for_doc)
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "select_context",
+        lambda **kwargs: (
+            kwargs["items"],
+            [
+                {"header": f"doc={item.doc_id} pages={item.page_start}-{item.page_end}", "text": item.text}
+                for item in kwargs["items"]
+            ],
+        ),
+    )
+
+    payload = run_chat(
+        query="coverage details",
+        debug_enabled=True,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore(
+            {
+                "doc1:c1": [0.2, -0.9],
+                "doc2:c1": [0.2, 0.9],
+            }
+        ),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["chunks"]
+    assert payload["selected_doc_ids"] == ["doc1", "doc2"]
+    assert payload["chunks"][0]["doc_id"] == "doc2"
+    assert payload["debug"]["broad_retrieval_retry"]["applied"] is True

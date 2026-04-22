@@ -571,9 +571,12 @@ def select_doc_ids_from_matches(
     strong = bool(top1["best_vector_score"] >= settings.doc_strong_min_score)
     if strong:
         if top2 is not None and float(top2["aggregate_score"]) > 0:
+            best_vector_lead = bool(
+                float(top1["best_vector_score"]) >= float(top2["best_vector_score"])
+            )
             strong = bool(
                 top1["aggregate_score"] >= top2["aggregate_score"] * settings.doc_strong_min_ratio
-                or len(top1["matched_kinds"]) >= 2
+                and best_vector_lead
             )
         else:
             strong = True
