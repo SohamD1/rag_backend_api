@@ -21,7 +21,7 @@ from app.core.doc_summaries import (
     query_doc_summaries,
     select_doc_ids_from_matches,
 )
-from app.core.generation import generate_answer
+from app.core.generation import generate_answer, review_answer
 from app.core.retrieval import (
     RetrievalItem,
     retrieval_item_from_dict,
@@ -355,11 +355,20 @@ def _extract_answer_citation_numbers(answer: str) -> List[int]:
     return ordered
 
 
+def _citation_keywords(text: str) -> set[str]:
+    return {
+        token
+        for token in re.sub(r"[^a-z0-9]+", " ", str(text or "").lower()).split()
+        if len(token) >= 4
+    }
+
+
 def _filter_citations_for_answer(
     *,
     citations: List[Dict[str, Any]],
     answer: str,
     context_items: List[Dict[str, Any]],
+    selected_items: List[RetrievalItem],
 ) -> List[Dict[str, Any]]:
     if "[" not in answer or "]" not in answer:
         return []
@@ -377,7 +386,47 @@ def _filter_citations_for_answer(
     if not cited_doc_ids:
         return citations
 
-    return [citation for citation in citations if citation.get("doc_id") in cited_doc_ids]
+    source_item_by_id = {
+        str(item.source_id or "").strip(): item
+        for item in selected_items
+        if str(item.source_id or "").strip()
+    }
+    answer_terms = _citation_keywords(answer)
+    filtered = [citation for citation in citations if citation.get("doc_id") in cited_doc_ids]
+    grouped: Dict[str, List[tuple[float, Dict[str, Any]]]] = {}
+
+    for citation in filtered:
+        source_id = str(citation.get("source_id") or "").strip()
+        item = source_item_by_id.get(source_id)
+        citation_terms = _citation_keywords(
+            " ".join(
+                [
+                    str(citation.get("section_title") or ""),
+                    str(getattr(item, "text", "") or ""),
+                ]
+            )
+        )
+        overlap = len(answer_terms.intersection(citation_terms))
+        score = float(overlap)
+        if item is not None:
+            score += float(item.score)
+        grouped.setdefault(str(citation.get("doc_id") or ""), []).append((score, citation))
+
+    narrowed: List[Dict[str, Any]] = []
+    for doc_id, doc_citations in grouped.items():
+        ranked = sorted(
+            doc_citations,
+            key=lambda entry: (
+                entry[0],
+                -int(entry[1].get("page_start") or 0),
+                -int(entry[1].get("page_end") or 0),
+            ),
+            reverse=True,
+        )
+        keep_count = min(2, len(ranked))
+        narrowed.extend(citation for _score, citation in ranked[:keep_count])
+
+    return narrowed
 
 
 def _build_chunk_payload(items: List[RetrievalItem]) -> List[Dict[str, Any]]:
@@ -637,11 +686,12 @@ def run_chat(
             "low_confidence_threshold": settings.low_confidence_threshold,
             "rewrite_model": settings.openai_rewrite_model,
             "rewrite_attempts": settings.doc_rewrite_max_attempts,
-            "citation_mode": "chunk_filtered_v2",
+            "citation_mode": "chunk_filtered_v3",
             "generate_answers_enabled": settings.rag_generate_answers_enabled,
             "generation_max_completion_tokens": getattr(
                 settings, "openai_generation_max_completion_tokens", 1400
             ),
+            "answer_review": True,
             "debug": debug_enabled,
         }
     )
@@ -1043,7 +1093,7 @@ def run_chat(
     _stage_start(on_event, "context_select")
     doc_labels = {m.doc_id: m.filename for m in selected_metas if m.filename}
     selected, context_items = select_context(
-        items=reranked, settings=settings, doc_labels=doc_labels or None
+        items=reranked, settings=settings, doc_labels=doc_labels or None, query=query
     )
     _stage_end(on_event, "context_select", int((perf_counter() - t_context) * 1000))
 
@@ -1091,11 +1141,18 @@ def run_chat(
         context_items=context_items,
         settings=settings,
     )
+    answer = review_answer(
+        query=query,
+        draft_answer=answer,
+        context_items=context_items,
+        settings=settings,
+    )
     _stage_end(on_event, "generate", int((perf_counter() - t_generate) * 1000))
     citations_for_answer = _filter_citations_for_answer(
         citations=citations,
         answer=answer,
         context_items=context_items,
+        selected_items=selected,
     )
 
     payload = {

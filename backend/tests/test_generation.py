@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.core.generation import generate_answer
+from app.core.generation import generate_answer, review_answer
 
 
 def _settings(**overrides):
@@ -52,3 +52,39 @@ def test_generate_answer_uses_explanatory_prompt_and_extended_token_budget(monke
     assert captured["kwargs"]["max_completion_tokens"] == 1400
     assert answer.startswith("A direct explanation [1].")
 
+
+def test_review_answer_fixes_exclusion_and_checklist_misses(monkeypatch):
+    captured = {}
+
+    def fake_chat_completions_create(settings, **kwargs):
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        content='{"answer":"Besides a will, the plan should include powers of attorney and incapacity planning [1]."}'
+                    )
+                )
+            ]
+        )
+
+    monkeypatch.setattr("app.core.generation.chat_completions_create", fake_chat_completions_create)
+
+    answer = review_answer(
+        query="What are the common elements of an estate plan besides a will?",
+        draft_answer="A will and powers of attorney are common estate planning tools [1].",
+        context_items=[
+            {
+                "header": "doc=guide pages=5-6",
+                "text": "Common elements include powers of attorney and planning for incapacity.",
+                "doc_id": "guide",
+            }
+        ],
+        settings=_settings(),
+    )
+
+    system_prompt = captured["kwargs"]["messages"][0]["content"]
+    user_prompt = captured["kwargs"]["messages"][1]["content"]
+    assert "improve answer completeness and instruction-following" in system_prompt
+    assert "Do not include wills" in user_prompt
+    assert answer.startswith("Besides a will")

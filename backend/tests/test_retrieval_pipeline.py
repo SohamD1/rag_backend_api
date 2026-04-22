@@ -1136,6 +1136,11 @@ def test_run_chat_returns_chunk_level_citations_filtered_to_cited_docs(monkeypat
         "generate_answer",
         lambda **kwargs: "Digital assets include stored records and online accounts [1]. They also create planning challenges [2].",
     )
+    monkeypatch.setattr(
+        pipeline,
+        "review_answer",
+        lambda **kwargs: kwargs["draft_answer"],
+    )
 
     payload = run_chat(
         query="What counts as digital assets and why do they matter?",
@@ -1166,3 +1171,67 @@ def test_run_chat_returns_chunk_level_citations_filtered_to_cited_docs(monkeypat
         ("doc1:c2", 4, 4),
         ("doc2:c1", 8, 9),
     }
+
+
+def test_run_chat_review_pass_can_fix_instruction_following(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(settings, rag_generate_answers_enabled=True)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename="doc1.pdf",
+                file_url=None,
+                source_url="https://example.com/doc1.pdf",
+                text="Besides a will, common elements include powers of attorney and incapacity planning.",
+                score=0.9,
+                page_start=5,
+                page_end=5,
+                section_title="Common elements of an estate plan",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "generate_answer",
+        lambda **kwargs: "A will and powers of attorney are common elements [1].",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "review_answer",
+        lambda **kwargs: "Besides a will, common elements include powers of attorney and incapacity planning [1].",
+    )
+
+    payload = run_chat(
+        query="What are the common elements of an estate plan besides a will?",
+        debug_enabled=True,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["answer"].startswith("Besides a will")
