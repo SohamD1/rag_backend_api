@@ -1,10 +1,8 @@
 import logging
 import os
-from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
 
 from app.api.health import router as health_router
 from app.api.v1.chat import router as chat_v1_router
@@ -28,7 +26,6 @@ _configure_logging()
 validate_settings(settings)
 
 app = FastAPI(title="RAG Backend API", version="1.0.0")
-STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,5 +44,10 @@ app.include_router(chat_v1_router, prefix="/api/v1")
 
 
 @app.get("/", include_in_schema=False)
-def serve_frontend() -> FileResponse:
-    return FileResponse(STATIC_DIR / "index.html")
+def root() -> dict[str, object]:
+    return {
+        "name": "RAG Backend API",
+        "version": "1.0.0",
+        "docs_url": "/docs",
+        "health_url": "/api/health",
+    }
