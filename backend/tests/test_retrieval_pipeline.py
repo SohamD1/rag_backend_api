@@ -498,6 +498,60 @@ def test_doc_selection_skips_summary_fetch_on_strong_match(monkeypatch):
     assert retrieval_embedding == [0.1, 0.2]
 
 
+def test_doc_selection_expands_to_multiple_docs_for_broad_strong_query(monkeypatch):
+    from app.core import pipeline
+
+    test_settings = replace(settings, doc_rewrite_max_attempts=0, doc_summary_top_k=3)
+    metas = [_meta("doc1"), _meta("doc2"), _meta("doc3")]
+
+    monkeypatch.setattr(
+        pipeline,
+        "query_doc_summaries",
+        lambda **kwargs: [
+            {
+                "id": "doc1:profile",
+                "score": 0.50,
+                "metadata": {"doc_id": "doc1", "summary_kind": "profile"},
+            },
+            {
+                "id": "doc1:headings",
+                "score": 0.47,
+                "metadata": {"doc_id": "doc1", "summary_kind": "headings"},
+            },
+            {
+                "id": "doc2:profile",
+                "score": 0.40,
+                "metadata": {"doc_id": "doc2", "summary_kind": "profile"},
+            },
+            {
+                "id": "doc2:headings",
+                "score": 0.39,
+                "metadata": {"doc_id": "doc2", "summary_kind": "headings"},
+            },
+            {
+                "id": "doc3:profile",
+                "score": 0.18,
+                "metadata": {"doc_id": "doc3", "summary_kind": "profile"},
+            },
+        ],
+    )
+
+    selected_ids, strong, retrieval_query, retrieval_embedding = select_docs_with_rewrite_retry(
+        query="What counts as digital assets? Give the definition, categories, and examples.",
+        query_embedding=[0.1, 0.2],
+        metas=metas,
+        settings=test_settings,
+        vector_store=NoopVectorStore(),
+        debug={},
+        allow_rewrite=True,
+    )
+
+    assert selected_ids == ["doc1", "doc2"]
+    assert strong is True
+    assert retrieval_query == "What counts as digital assets? Give the definition, categories, and examples."
+    assert retrieval_embedding == [0.1, 0.2]
+
+
 def test_doc_selection_can_win_on_keywords_signal(monkeypatch):
     from app.core import pipeline
 
@@ -982,3 +1036,133 @@ def test_run_chat_broadens_doc_scope_after_low_confidence_retrieval(monkeypatch)
     assert payload["selected_doc_ids"] == ["doc1", "doc2"]
     assert payload["chunks"][0]["doc_id"] == "doc2"
     assert payload["debug"]["broad_retrieval_retry"]["applied"] is True
+
+
+def test_run_chat_returns_chunk_level_citations_filtered_to_cited_docs(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1"), _meta("doc2"), _meta("doc3")])
+    test_settings = replace(settings, rag_generate_answers_enabled=True, context_use_mmr=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (
+            ["doc1", "doc2", "doc3"],
+            False,
+            kwargs["query"],
+            kwargs["query_embedding"],
+        ),
+    )
+
+    def fake_retrieve_standard_for_doc(**kwargs):
+        doc_id = kwargs["doc_id"]
+        if doc_id == "doc1":
+            return [
+                RetrievalItem(
+                    source_id="doc1:c1",
+                    doc_id="doc1",
+                    filename="doc1.pdf",
+                    file_url=None,
+                    source_url="https://example.com/doc1.pdf",
+                    text="doc1 evidence",
+                    score=0.94,
+                    page_start=2,
+                    page_end=2,
+                    section_title="Definition",
+                    route="standard",
+                    vector_namespace="doc1::ver1",
+                ),
+                RetrievalItem(
+                    source_id="doc1:c2",
+                    doc_id="doc1",
+                    filename="doc1.pdf",
+                    file_url=None,
+                    source_url="https://example.com/doc1.pdf",
+                    text="doc1 example",
+                    score=0.90,
+                    page_start=4,
+                    page_end=4,
+                    section_title="Examples",
+                    route="standard",
+                    vector_namespace="doc1::ver1",
+                ),
+            ]
+        if doc_id == "doc2":
+            return [
+                RetrievalItem(
+                    source_id="doc2:c1",
+                    doc_id="doc2",
+                    filename="doc2.pdf",
+                    file_url=None,
+                    source_url="https://example.com/doc2.pdf",
+                    text="doc2 supporting evidence",
+                    score=0.88,
+                    page_start=8,
+                    page_end=9,
+                    section_title="Planning implications",
+                    route="standard",
+                    vector_namespace="doc2::ver1",
+                )
+            ]
+        return [
+            RetrievalItem(
+                source_id="doc3:c1",
+                doc_id="doc3",
+                filename="doc3.pdf",
+                file_url=None,
+                source_url="https://example.com/doc3.pdf",
+                text="doc3 unrelated evidence",
+                score=0.60,
+                page_start=10,
+                page_end=10,
+                section_title="Other topic",
+                route="standard",
+                vector_namespace="doc3::ver1",
+            )
+        ]
+
+    monkeypatch.setattr(pipeline, "retrieve_standard_for_doc", fake_retrieve_standard_for_doc)
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "generate_answer",
+        lambda **kwargs: "Digital assets include stored records and online accounts [1]. They also create planning challenges [2].",
+    )
+
+    payload = run_chat(
+        query="What counts as digital assets and why do they matter?",
+        debug_enabled=True,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore(
+            {
+                "doc1:c1": [0.1, 0.2],
+                "doc1:c2": [0.2, 0.1],
+                "doc2:c1": [0.3, 0.4],
+                "doc3:c1": [0.4, 0.5],
+            }
+        ),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["answer"]
+    assert {citation["doc_id"] for citation in payload["citations"]} == {"doc1", "doc2"}
+    assert {citation["source_id"] for citation in payload["citations"]} == {"doc1:c1", "doc1:c2", "doc2:c1"}
+    assert {
+        (citation["source_id"], citation["page_start"], citation["page_end"])
+        for citation in payload["citations"]
+    } == {
+        ("doc1:c1", 2, 2),
+        ("doc1:c2", 4, 4),
+        ("doc2:c1", 8, 9),
+    }

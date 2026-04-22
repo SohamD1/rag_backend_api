@@ -73,6 +73,9 @@ class Settings:
     openai_generation_model: str = _get_env(
         "OPENAI_GENERATION_MODEL", "gpt-5.4-nano-2026-03-17"
     )
+    openai_generation_max_completion_tokens: int = _get_env(
+        "OPENAI_GENERATION_MAX_COMPLETION_TOKENS", 1400, int
+    )
     openai_tree_model: str = _get_env(
         "OPENAI_TREE_MODEL", "gpt-5.4-nano-2026-03-17"
     )

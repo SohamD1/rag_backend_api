@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import queue
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from time import perf_counter
@@ -34,6 +35,32 @@ from app.storage.registry import DocMeta, DocRegistry
 
 
 logger = logging.getLogger(__name__)
+
+_INLINE_CITATION_RE = re.compile(r"\[([0-9,\s]+)\]")
+_BROAD_QUERY_PATTERNS = (
+    "what is",
+    "what are",
+    "what counts as",
+    "why ",
+    "how ",
+    "when ",
+    "common elements",
+    "what should be included",
+    "what questions should",
+    "what rights",
+    "what are the main challenges",
+    "definition",
+    "definitions",
+    "examples",
+    "categories",
+    "challenges",
+    "rights",
+    "used",
+    "matter",
+    "include",
+    "inventory",
+    "besides",
+)
 
 
 _STAGE_LABELS: Dict[str, str] = {
@@ -200,45 +227,157 @@ def _should_skip_rerank(
     return True
 
 
-def _consolidate_citations(
+def _is_broad_synthesis_query(query: str) -> bool:
+    normalized = " ".join(str(query or "").lower().split())
+    if len(normalized.split()) < 6:
+        return False
+    return any(pattern in normalized for pattern in _BROAD_QUERY_PATTERNS)
+
+
+def _expand_strong_doc_selection(
+    *,
+    query: str,
+    ranked: List[Dict[str, Any]],
+    settings: Settings,
+) -> List[str]:
+    if not ranked:
+        return []
+
+    top_doc_id = str(ranked[0].get("doc_id") or "").strip()
+    if not top_doc_id:
+        return []
+    if not _is_broad_synthesis_query(query):
+        return [top_doc_id]
+
+    selected = [top_doc_id]
+    top_aggregate = float(ranked[0].get("aggregate_score", 0.0) or 0.0)
+    top_vector = float(ranked[0].get("best_vector_score", 0.0) or 0.0)
+    max_docs = min(3, max(2, int(getattr(settings, "doc_summary_top_k", 3) or 3)))
+
+    for candidate in ranked[1:]:
+        if len(selected) >= max_docs:
+            break
+        candidate_doc_id = str(candidate.get("doc_id") or "").strip()
+        if not candidate_doc_id:
+            continue
+        aggregate = float(candidate.get("aggregate_score", 0.0) or 0.0)
+        vector_score = float(candidate.get("best_vector_score", 0.0) or 0.0)
+        lexical_score = float(candidate.get("lexical_score", 0.0) or 0.0)
+
+        if aggregate < max(0.18, top_aggregate * 0.82):
+            continue
+        if vector_score > 0.0 and vector_score < max(0.22, top_vector * 0.72):
+            continue
+        if vector_score <= 0.0 and lexical_score < 0.20:
+            continue
+        selected.append(candidate_doc_id)
+
+    return selected
+
+
+def _build_chunk_citations(
     *,
     items: List[RetrievalItem],
     source_url_by_doc_id: Dict[str, str],
 ) -> List[Dict[str, Any]]:
-    by_doc: Dict[str, Dict[str, Any]] = {}
-    doc_order: List[str] = []
-
+    citations: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    per_doc_count: Dict[str, int] = {}
     for item in items:
         doc_id = str(item.doc_id or "").strip()
         if not doc_id:
             continue
-        if doc_id not in by_doc:
-            by_doc[doc_id] = {
+        source_id = str(item.source_id or "").strip()
+        dedupe_key = source_id or "|".join(
+            [
+                doc_id,
+                str(int(item.page_start)),
+                str(int(item.page_end)),
+                str(item.section_title or ""),
+            ]
+        )
+        if dedupe_key in seen:
+            continue
+        if per_doc_count.get(doc_id, 0) >= 3:
+            continue
+
+        citations.append(
+            {
                 "doc_id": doc_id,
                 "filename": item.filename,
                 "file_url": item.file_url,
                 "source_url": item.source_url or source_url_by_doc_id.get(doc_id, ""),
-                "source_id": f"{doc_id}:consolidated",
+                "source_id": source_id or f"{doc_id}:citation:{per_doc_count.get(doc_id, 0) + 1}",
                 "page_start": int(item.page_start),
                 "page_end": int(item.page_end),
                 "section_title": item.section_title,
             }
-            doc_order.append(doc_id)
+        )
+        seen.add(dedupe_key)
+        per_doc_count[doc_id] = per_doc_count.get(doc_id, 0) + 1
+
+        if len(citations) >= 12:
+            break
+
+    return citations
+
+
+def _context_doc_number_map(context_items: List[Dict[str, Any]]) -> Dict[int, str]:
+    mapping: Dict[int, str] = {}
+    seen_doc_ids: set[str] = set()
+
+    for item in context_items:
+        doc_id = str(item.get("doc_id") or "").strip()
+        if not doc_id or doc_id in seen_doc_ids:
             continue
+        seen_doc_ids.add(doc_id)
+        mapping[len(mapping) + 1] = doc_id
 
-        cur = by_doc[doc_id]
-        cur["page_start"] = min(int(cur["page_start"]), int(item.page_start))
-        cur["page_end"] = max(int(cur["page_end"]), int(item.page_end))
-        if not cur.get("filename") and item.filename:
-            cur["filename"] = item.filename
-        if not cur.get("file_url") and item.file_url:
-            cur["file_url"] = item.file_url
-        if not cur.get("source_url"):
-            cur["source_url"] = item.source_url or source_url_by_doc_id.get(doc_id, "")
-        if not cur.get("section_title") and item.section_title:
-            cur["section_title"] = item.section_title
+    return mapping
 
-    return [by_doc[doc_id] for doc_id in doc_order]
+
+def _extract_answer_citation_numbers(answer: str) -> List[int]:
+    seen: set[int] = set()
+    ordered: List[int] = []
+
+    for match in _INLINE_CITATION_RE.finditer(str(answer or "")):
+        raw = str(match.group(1) or "")
+        for token in raw.split(","):
+            cleaned = token.strip()
+            if not cleaned.isdigit():
+                continue
+            number = int(cleaned)
+            if number <= 0 or number in seen:
+                continue
+            seen.add(number)
+            ordered.append(number)
+
+    return ordered
+
+
+def _filter_citations_for_answer(
+    *,
+    citations: List[Dict[str, Any]],
+    answer: str,
+    context_items: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    if "[" not in answer or "]" not in answer:
+        return []
+
+    cited_numbers = _extract_answer_citation_numbers(answer)
+    if not cited_numbers:
+        return citations
+
+    doc_number_map = _context_doc_number_map(context_items)
+    cited_doc_ids = {
+        doc_number_map[number]
+        for number in cited_numbers
+        if number in doc_number_map
+    }
+    if not cited_doc_ids:
+        return citations
+
+    return [citation for citation in citations if citation.get("doc_id") in cited_doc_ids]
 
 
 def _build_chunk_payload(items: List[RetrievalItem]) -> List[Dict[str, Any]]:
@@ -355,11 +494,21 @@ def select_docs_with_rewrite_retry(
         }
 
     if strong and selected_ids:
+        ranked = list(info.get("ranked") or [])
+        expanded_selected_ids = _expand_strong_doc_selection(
+            query=query,
+            ranked=ranked,
+            settings=settings,
+        )
+        if expanded_selected_ids:
+            selected_ids = expanded_selected_ids
         if debug is not None:
             debug["doc_selection"]["fallback"] = None
+            debug["doc_selection"]["selected_doc_ids"] = selected_ids
+            debug["doc_selection"]["expanded_for_breadth"] = len(selected_ids) > 1
         if rewritten_query != query:
-            return [selected_ids[0]], True, rewritten_query, rewritten_embedding
-        return [selected_ids[0]], True, query, query_embedding
+            return selected_ids, True, rewritten_query, rewritten_embedding
+        return selected_ids, True, query, query_embedding
 
     if not selected_ids:
         fallback = [
@@ -488,8 +637,11 @@ def run_chat(
             "low_confidence_threshold": settings.low_confidence_threshold,
             "rewrite_model": settings.openai_rewrite_model,
             "rewrite_attempts": settings.doc_rewrite_max_attempts,
-            "citation_mode": "doc_consolidated_v1",
+            "citation_mode": "chunk_filtered_v2",
             "generate_answers_enabled": settings.rag_generate_answers_enabled,
+            "generation_max_completion_tokens": getattr(
+                settings, "openai_generation_max_completion_tokens", 1400
+            ),
             "debug": debug_enabled,
         }
     )
@@ -897,7 +1049,7 @@ def run_chat(
 
     source_url_by_doc_id = {m.doc_id: getattr(m, "source_url", "") for m in selected_metas}
 
-    citations = _consolidate_citations(
+    citations = _build_chunk_citations(
         items=selected,
         source_url_by_doc_id=source_url_by_doc_id,
     )
@@ -940,7 +1092,11 @@ def run_chat(
         settings=settings,
     )
     _stage_end(on_event, "generate", int((perf_counter() - t_generate) * 1000))
-    citations_for_answer = citations if "[" in answer and "]" in answer else []
+    citations_for_answer = _filter_citations_for_answer(
+        citations=citations,
+        answer=answer,
+        context_items=context_items,
+    )
 
     payload = {
         "answer": answer,
