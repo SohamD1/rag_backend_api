@@ -91,6 +91,34 @@ def test_select_context_preserves_same_text_across_docs():
     assert [item["doc_id"] for item in context_items] == ["doc-a", "doc-b"]
 
 
+def test_select_context_prioritizes_missing_requested_facets():
+    items = [
+        _item(
+            source_id="a",
+            doc_id="doc-a",
+            text="Bank accounts, property, and investments should be listed.",
+            score=0.95,
+            section_title="Assets",
+        ),
+        _item(
+            source_id="b",
+            doc_id="doc-b",
+            text="Mortgages, leases, and other debts should also be included.",
+            score=0.70,
+            section_title="Liabilities",
+        ),
+    ]
+
+    selected, context_items = select_context(
+        items=items,
+        settings=_settings(max_context_tokens=20),
+        query="What should be included in an inventory of assets and liabilities?",
+    )
+
+    assert [item.source_id for item in selected] == ["a", "b"]
+    assert [item["doc_id"] for item in context_items] == ["doc-a", "doc-b"]
+
+
 def test_rerank_prefers_a_useful_nonredundant_second_item():
     items = [
         _item(
