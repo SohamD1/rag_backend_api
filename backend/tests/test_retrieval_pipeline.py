@@ -410,6 +410,136 @@ def test_run_chat_returns_retrieval_payload_without_debug(monkeypatch):
     assert payload["debug"] is None
 
 
+def test_run_chat_retrieval_payload_prefers_registry_source_url_over_file_metadata(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(settings, rag_generate_answers_enabled=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename="doc1.pdf",
+                file_url=None,
+                source_url="file:///C:/docs/doc1.pdf",
+                text="useful evidence",
+                score=0.9,
+                page_start=1,
+                page_end=1,
+                section_title="Intro",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "select_context",
+        lambda **kwargs: (
+            kwargs["items"],
+            [{"header": "doc=doc1 pages=1-1", "text": "useful evidence"}],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "generate_answer", lambda **kwargs: "")
+
+    payload = run_chat(
+        query="what is useful",
+        debug_enabled=False,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["chunks"]
+    assert payload["chunks"][0]["source_url"] == "https://example.com/doc1.pdf"
+
+
+def test_run_chat_retrieval_payload_prefers_registry_filename_when_chunk_metadata_is_missing(
+    monkeypatch,
+):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(settings, rag_generate_answers_enabled=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename=None,
+                file_url=None,
+                source_url="https://example.com/doc1.pdf",
+                text="useful evidence",
+                score=0.9,
+                page_start=1,
+                page_end=1,
+                section_title="Intro",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "select_context",
+        lambda **kwargs: (
+            kwargs["items"],
+            [{"header": "doc=doc1 pages=1-1", "text": "useful evidence"}],
+        ),
+    )
+    monkeypatch.setattr(pipeline, "generate_answer", lambda **kwargs: "")
+
+    payload = run_chat(
+        query="what is useful",
+        debug_enabled=False,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["chunks"]
+    assert payload["chunks"][0]["filename"] == "doc1.pdf"
+
+
 def test_doc_selection_aggregates_summary_kinds_and_initial_rewrite(monkeypatch):
     from app.core import pipeline
 
@@ -1182,6 +1312,136 @@ def test_run_chat_returns_chunk_level_citations_filtered_to_cited_docs(monkeypat
         ("doc2:c1", 8, 9),
     }
     assert all("file_url" not in citation for citation in payload["citations"])
+
+
+def test_run_chat_citations_prefer_registry_source_url_over_file_metadata(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(settings, rag_generate_answers_enabled=True, context_use_mmr=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename="doc1.pdf",
+                file_url=None,
+                source_url="file:///C:/docs/doc1.pdf",
+                text="doc1 evidence",
+                score=0.94,
+                page_start=2,
+                page_end=2,
+                section_title="Definition",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "generate_answer",
+        lambda **kwargs: "Digital assets include stored records [1].",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "review_answer",
+        lambda **kwargs: kwargs["draft_answer"],
+    )
+
+    payload = run_chat(
+        query="What counts as digital assets?",
+        debug_enabled=False,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["citations"]
+    assert payload["citations"][0]["source_url"] == "https://example.com/doc1.pdf"
+
+
+def test_run_chat_citations_prefer_registry_filename_when_chunk_metadata_is_missing(monkeypatch):
+    from app.core import pipeline
+
+    retrieval_cache = RecordingCache()
+    response_cache = RecordingCache()
+    registry = FakeRegistry([_meta("doc1")])
+    test_settings = replace(settings, rag_generate_answers_enabled=True, context_use_mmr=False)
+
+    monkeypatch.setattr(
+        pipeline,
+        "embed_texts",
+        lambda texts, settings: [[0.1, 0.2] for _ in texts],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "select_docs_with_rewrite_retry",
+        lambda **kwargs: (["doc1"], False, kwargs["query"], kwargs["query_embedding"]),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "retrieve_standard_for_doc",
+        lambda **kwargs: [
+            RetrievalItem(
+                source_id="doc1:c1",
+                doc_id="doc1",
+                filename=None,
+                file_url=None,
+                source_url="https://example.com/doc1.pdf",
+                text="doc1 evidence",
+                score=0.94,
+                page_start=2,
+                page_end=2,
+                section_title="Definition",
+                route="standard",
+                vector_namespace="doc1::ver1",
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "retrieve_tree_for_doc", lambda **kwargs: [])
+    monkeypatch.setattr(
+        pipeline,
+        "generate_answer",
+        lambda **kwargs: "Digital assets include stored records [1].",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "review_answer",
+        lambda **kwargs: kwargs["draft_answer"],
+    )
+
+    payload = run_chat(
+        query="What counts as digital assets?",
+        debug_enabled=False,
+        settings=test_settings,
+        registry=registry,
+        vector_store=FetchingVectorStore({"doc1:c1": [0.1, 0.2]}),
+        retrieval_cache=retrieval_cache,
+        response_cache=response_cache,
+        tree_dir=None,
+    )
+
+    assert payload["citations"]
+    assert payload["citations"][0]["filename"] == "doc1.pdf"
 
 
 def test_run_chat_review_pass_can_fix_instruction_following(monkeypatch):

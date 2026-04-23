@@ -37,6 +37,7 @@ from app.storage.registry import DocMeta, DocRegistry
 logger = logging.getLogger(__name__)
 
 _INLINE_CITATION_RE = re.compile(r"\[([0-9,\s]+)\]")
+_HTTP_SOURCE_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
 _BROAD_QUERY_PATTERNS = (
     "what is",
     "what are",
@@ -279,6 +280,7 @@ def _build_chunk_citations(
     *,
     items: List[RetrievalItem],
     source_url_by_doc_id: Dict[str, str],
+    filename_by_doc_id: Dict[str, str],
 ) -> List[Dict[str, Any]]:
     citations: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -301,11 +303,19 @@ def _build_chunk_citations(
         if per_doc_count.get(doc_id, 0) >= 3:
             continue
 
+        source_url = _resolve_source_url(
+            candidate=item.source_url,
+            fallback=source_url_by_doc_id.get(doc_id, ""),
+        )
+        filename = _resolve_filename(
+            candidate=item.filename,
+            fallback=filename_by_doc_id.get(doc_id, ""),
+        )
         citations.append(
             {
                 "doc_id": doc_id,
-                "filename": item.filename,
-                "source_url": item.source_url or source_url_by_doc_id.get(doc_id, ""),
+                "filename": filename,
+                "source_url": source_url,
                 "source_id": source_id or f"{doc_id}:citation:{per_doc_count.get(doc_id, 0) + 1}",
                 "page_start": int(item.page_start),
                 "page_end": int(item.page_end),
@@ -428,15 +438,49 @@ def _filter_citations_for_answer(
     return narrowed
 
 
-def _build_chunk_payload(items: List[RetrievalItem]) -> List[Dict[str, Any]]:
+def _is_http_source_url(value: Optional[str]) -> bool:
+    return bool(_HTTP_SOURCE_URL_RE.match(str(value or "").strip()))
+
+
+def _resolve_source_url(*, candidate: Optional[str], fallback: Optional[str]) -> str:
+    candidate_value = str(candidate or "").strip()
+    fallback_value = str(fallback or "").strip()
+
+    if _is_http_source_url(candidate_value):
+        return candidate_value
+    if _is_http_source_url(fallback_value):
+        return fallback_value
+    return candidate_value or fallback_value
+
+
+def _resolve_filename(*, candidate: Optional[str], fallback: Optional[str]) -> Optional[str]:
+    candidate_value = str(candidate or "").strip()
+    fallback_value = str(fallback or "").strip()
+    resolved = candidate_value or fallback_value
+    return resolved or None
+
+
+def _build_chunk_payload(
+    items: List[RetrievalItem],
+    source_url_by_doc_id: Dict[str, str],
+    filename_by_doc_id: Dict[str, str],
+) -> List[Dict[str, Any]]:
     chunks: List[Dict[str, Any]] = []
     for item in items:
+        source_url = _resolve_source_url(
+            candidate=item.source_url,
+            fallback=source_url_by_doc_id.get(item.doc_id, ""),
+        )
+        filename = _resolve_filename(
+            candidate=item.filename,
+            fallback=filename_by_doc_id.get(item.doc_id, ""),
+        )
         chunks.append(
             {
                 "source_id": item.source_id,
                 "doc_id": item.doc_id,
-                "filename": item.filename,
-                "source_url": item.source_url,
+                "filename": filename,
+                "source_url": source_url,
                 "text": item.text,
                 "score": float(item.score),
                 "page_start": int(item.page_start),
@@ -1096,6 +1140,7 @@ def run_chat(
     _stage_end(on_event, "context_select", int((perf_counter() - t_context) * 1000))
 
     source_url_by_doc_id = {m.doc_id: getattr(m, "source_url", "") for m in selected_metas}
+    filename_by_doc_id = {m.doc_id: getattr(m, "filename", "") for m in selected_metas}
 
     if not generation_enabled:
         _emit(
@@ -1109,7 +1154,7 @@ def run_chat(
         )
         payload = {
             "query": query,
-            "chunks": _build_chunk_payload(selected),
+            "chunks": _build_chunk_payload(selected, source_url_by_doc_id, filename_by_doc_id),
             "selected_doc_ids": [m.doc_id for m in selected_metas],
             "route": _route_label(selected_metas),
             "used_context_count": len(selected),
@@ -1129,6 +1174,7 @@ def run_chat(
     citations = _build_chunk_citations(
         items=selected,
         source_url_by_doc_id=source_url_by_doc_id,
+        filename_by_doc_id=filename_by_doc_id,
     )
 
     t_generate = perf_counter()
