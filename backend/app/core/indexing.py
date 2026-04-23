@@ -10,7 +10,6 @@ from app.config import Settings
 from app.core.chunking import chunk_document
 from app.core.doc_summaries import (
     build_doc_summary_texts,
-    compute_centroid,
     extract_heading_candidates_from_texts,
 )
 from app.core.pdf_text import PageText
@@ -21,7 +20,6 @@ from app.services.tree_index import TreeNode, build_tree, save_headings, save_tr
 @dataclass(frozen=True)
 class IndexBuildResult:
     indexed_count: int
-    centroid: List[float]
     doc_summary_texts: Dict[str, str]
     namespace: str
 
@@ -51,7 +49,6 @@ def build_standard_index(
     texts = [c.text for c in chunks]
     embeddings = embed_texts(texts, settings)
 
-    centroid = compute_centroid(embeddings)
     heading_candidates = extract_heading_candidates_from_texts([page.text for page in pages])
     doc_summary_texts = build_doc_summary_texts(
         slug=slug,
@@ -92,7 +89,6 @@ def build_standard_index(
     vector_store.upsert(items, namespace=namespace)
     return IndexBuildResult(
         indexed_count=len(items),
-        centroid=centroid,
         doc_summary_texts=doc_summary_texts,
         namespace=namespace,
     )
@@ -168,7 +164,6 @@ def build_tree_index(
 
     embeddings = embed_texts(embed_inputs, settings)
 
-    centroid = compute_centroid(embeddings)
     heading_titles = [
         node.title
         for node in nodes_to_embed
@@ -198,7 +193,6 @@ def build_tree_index(
     vector_store.upsert(items, namespace=namespace)
     return IndexBuildResult(
         indexed_count=len(items),
-        centroid=centroid,
         doc_summary_texts=doc_summary_texts,
         namespace=namespace,
     )

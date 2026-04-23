@@ -128,12 +128,12 @@ class Settings:
     )
     doc_strong_min_score: float = _get_env("DOC_STRONG_MIN_SCORE", 0.35, float)
     doc_strong_min_ratio: float = _get_env("DOC_STRONG_MIN_RATIO", 1.15, float)
-    doc_rewrite_max_attempts: int = _get_env("DOC_REWRITE_MAX_ATTEMPTS", 1, int)
+    doc_rewrite_max_attempts: int = _get_env("DOC_REWRITE_MAX_ATTEMPTS", 0, int)
 
     # Retrieval / rerank / context
-    retrieve_top_k: int = _get_env("RETRIEVE_TOP_K", 60, int)
-    rerank_candidate_k: int = _get_env("RERANK_CANDIDATE_K", 50, int)
-    rerank_top_k: int = _get_env("RERANK_TOP_K", 10, int)
+    retrieve_top_k: int = _get_env("RETRIEVE_TOP_K", 30, int)
+    rerank_candidate_k: int = _get_env("RERANK_CANDIDATE_K", 20, int)
+    rerank_top_k: int = _get_env("RERANK_TOP_K", 6, int)
     max_context_tokens: int = _get_env("MAX_CONTEXT_TOKENS", 4500, int)
     # Cap any single context item to avoid one long chunk starving the entire context budget.
     context_max_item_tokens: int = _get_env("CONTEXT_MAX_ITEM_TOKENS", 1200, int)
@@ -164,7 +164,7 @@ class Settings:
     tree_node_summary_token_threshold: int = _get_env("TREE_NODE_SUMMARY_TOKEN_THRESHOLD", 200, int)
     tree_node_summary_max_workers: int = _get_env("TREE_NODE_SUMMARY_MAX_WORKERS", 4, int)
     tree_node_summary_max_nodes: int = _get_env("TREE_NODE_SUMMARY_MAX_NODES", 200, int)
-    tree_node_selection_mode: str = _get_env("TREE_NODE_SELECTION_MODE", "vector_then_llm")
+    tree_node_selection_mode: str = _get_env("TREE_NODE_SELECTION_MODE", "vector_only")
     tree_node_selection_candidate_k: int = _get_env("TREE_NODE_SELECTION_CANDIDATE_K", 24, int)
     tree_node_selection_top_n: int = _get_env("TREE_NODE_SELECTION_TOP_N", 6, int)
     tree_node_selection_max_tree_nodes: int = _get_env("TREE_NODE_SELECTION_MAX_TREE_NODES", 80, int)
@@ -179,7 +179,7 @@ class Settings:
     sse_heartbeat_seconds: float = _get_env("SSE_HEARTBEAT_SECONDS", 15.0, float)
 
     # Versioning
-    index_schema_version: str = _get_env("INDEX_SCHEMA_VERSION", "v4")
+    index_schema_version: str = _get_env("INDEX_SCHEMA_VERSION", "v5")
 
     def __post_init__(self) -> None:
         app_env = _normalize_app_env(self.app_env)

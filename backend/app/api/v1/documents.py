@@ -508,7 +508,6 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
                 token_count=token_count,
                 index_version=index_version,
                 summary_texts=build_result.doc_summary_texts,
-                centroid_values=build_result.centroid,
                 settings=settings,
                 vector_store=vector_store,
             )

@@ -29,7 +29,8 @@ Token usage:
 OCR behavior:
 - `POST /api/v1/documents` always sends uploaded PDFs through Mistral OCR.
 - `MISTRAL_API_KEY` is therefore required for document ingestion.
-- The default `INDEX_SCHEMA_VERSION` is now `v4` so reingests pick up the OCR-only extraction path.
+- The default `INDEX_SCHEMA_VERSION` is now `v5` so reingests pick up the multi-vector-only
+  document summary layout.
 
 ## Retrieval Strategy
 
@@ -37,8 +38,8 @@ This backend is designed around a two-stage retrieval flow:
 
 1. Ingest each document into its own Pinecone namespace: `{doc_id}::{index_version}`.
 2. Also store lightweight document-routing records for that doc in the global doc-summary namespace
-   (`__doc_summaries` by default): a legacy centroid plus multi-vector summaries such as
-   `profile` and `headings`.
+   (`__doc_summaries` by default): multi-vector summaries such as `profile`, `headings`,
+   and `keywords`.
 3. At query time, search the doc-summary namespace first, aggregate hits by `doc_id`, blend vector
    and lexical metadata signals, and pick the most likely document or top few candidate documents.
 4. Then search only those selected document namespaces for the final chunk/paragraph retrieval.

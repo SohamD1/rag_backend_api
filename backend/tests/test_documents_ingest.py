@@ -228,7 +228,7 @@ def test_successful_ingest_persists_index_only_metadata(client, monkeypatch, wor
     assert all("file_url" not in metadata for metadata in all_metadata)
 
 
-def test_successful_ingest_keeps_legacy_centroid_and_multi_vector_summaries(
+def test_successful_ingest_writes_multi_vector_summaries(
     client, monkeypatch, work_tmp
 ):
     stored = _stored_file(work_tmp, "doc__abc12345")
@@ -261,7 +261,7 @@ def test_successful_ingest_keeps_legacy_centroid_and_multi_vector_summaries(
     assert summary_upserts
 
     summary_ids = [item_id for items in summary_upserts for item_id, _metadata in items]
-    assert stored.doc_id in summary_ids
+    assert stored.doc_id not in summary_ids
     assert f"{stored.doc_id}:profile" in summary_ids
     assert f"{stored.doc_id}:headings" in summary_ids
     assert f"{stored.doc_id}:keywords" in summary_ids

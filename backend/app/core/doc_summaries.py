@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Mapping, Sequence, Tuple
 from urllib.parse import urlparse
 
 from app.adapters.embeddings import embed_texts
@@ -45,44 +45,10 @@ _HEADING_PREFIX_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*|[A-Z]|[IVXLC]+)[).:\-\s]+
 _NON_WORD_RE = re.compile(r"[^a-z0-9]+")
 
 
-def _l2_normalize(vec: List[float]) -> List[float]:
-    if not vec:
-        return []
-    norm = sum(v * v for v in vec) ** 0.5
-    if norm <= 0:
-        return []
-    return [v / norm for v in vec]
-
-
-def compute_centroid(embeddings: List[List[float]]) -> List[float]:
-    if not embeddings:
-        return []
-    dim = len(embeddings[0])
-    if dim <= 0:
-        return []
-    accum = [0.0] * dim
-    count = 0
-    for vec in embeddings:
-        if not vec or len(vec) != dim:
-            continue
-        v = _l2_normalize(vec)
-        if not v:
-            continue
-        for i, value in enumerate(v):
-            accum[i] += value
-        count += 1
-    if count <= 0:
-        return []
-    centroid = [v / count for v in accum]
-    return _l2_normalize(centroid)
-
-
 def doc_summary_record_ids(doc_id: str) -> List[str]:
     if not doc_id:
         return []
-    ids = [doc_id]
-    ids.extend(f"{doc_id}:{kind}" for kind in DOC_SUMMARY_KINDS)
-    return ids
+    return [f"{doc_id}:{kind}" for kind in DOC_SUMMARY_KINDS]
 
 
 def upsert_doc_summary_records(
@@ -363,44 +329,6 @@ def build_doc_summary_records(
     return items
 
 
-def build_legacy_doc_summary_record(
-    *,
-    doc_id: str,
-    slug: str,
-    filename: str,
-    source_url: str,
-    route: str,
-    page_count: int,
-    token_count: int,
-    index_version: str,
-    centroid_values: Sequence[float],
-    summary_text: str,
-    settings: Settings,
-) -> Dict[str, Any] | None:
-    values = list(centroid_values or [])
-    if not doc_id or not values:
-        return None
-    return {
-        "id": doc_id,
-        "values": values,
-        "metadata": {
-            "doc_id": doc_id,
-            "slug": slug,
-            "filename": filename,
-            "source_url": source_url,
-            "route": route,
-            "page_count": page_count,
-            "token_count": token_count,
-            "index_version": index_version,
-            "summary_kind": "centroid",
-            "summary_text": _normalize_space(summary_text),
-            "doc_summary_strategy": getattr(
-                settings, "doc_summary_strategy_version", "multi_vector_v1"
-            ),
-        },
-    }
-
-
 def upsert_doc_summaries(
     *,
     doc_id: str,
@@ -412,7 +340,6 @@ def upsert_doc_summaries(
     token_count: int,
     index_version: str,
     summary_texts: Mapping[str, str],
-    centroid_values: Optional[Sequence[float]],
     settings: Settings,
     vector_store: PineconeVectorStore,
 ) -> None:
@@ -428,25 +355,6 @@ def upsert_doc_summaries(
         summary_texts=summary_texts,
         settings=settings,
     )
-    legacy_record = build_legacy_doc_summary_record(
-        doc_id=doc_id,
-        slug=slug,
-        filename=filename,
-        source_url=source_url,
-        route=route,
-        page_count=page_count,
-        token_count=token_count,
-        index_version=index_version,
-        centroid_values=centroid_values or [],
-        summary_text=str(
-            summary_texts.get("profile")
-            or summary_texts.get("headings")
-            or ""
-        ),
-        settings=settings,
-    )
-    if legacy_record is not None:
-        records = [legacy_record, *records]
     upsert_doc_summary_records(records=records, settings=settings, vector_store=vector_store)
 
 
@@ -479,7 +387,7 @@ def select_doc_ids_from_matches(
         doc_id = str(meta.get("doc_id") or match.get("id") or "").strip()
         if not doc_id:
             continue
-        summary_kind = str(meta.get("summary_kind") or "centroid").strip() or "centroid"
+        summary_kind = str(meta.get("summary_kind") or "profile").strip() or "profile"
         score = float(match.get("score", 0.0))
         query_variant = str(match.get("query_variant") or "raw")
         entry = grouped.setdefault(
