@@ -71,7 +71,6 @@ class PineconeVectorStore:
         top_k: int,
         namespace: str,
         filter: Optional[Dict] = None,
-        include_values: bool = False,
     ) -> List[Dict]:
         if getattr(self.settings, "log_payloads", False):
             logger.info(
@@ -80,7 +79,6 @@ class PineconeVectorStore:
                     "namespace": namespace,
                     "top_k": int(top_k),
                     "filter": filter,
-                    "include_values": bool(include_values),
                 },
             )
         response = self.index.query(
@@ -89,7 +87,7 @@ class PineconeVectorStore:
             namespace=namespace,
             filter=filter,
             include_metadata=True,
-            include_values=bool(include_values),
+            include_values=False,
             _request_timeout=self._request_timeout(),
         )
         matches: List[Dict] = []
@@ -99,8 +97,6 @@ class PineconeVectorStore:
                 "score": float(match.get("score", 0.0)),
                 "metadata": match.get("metadata", {}) or {},
             }
-            if include_values and match.get("values") is not None:
-                item["values"] = match.get("values")
             matches.append(item)
         return matches
 

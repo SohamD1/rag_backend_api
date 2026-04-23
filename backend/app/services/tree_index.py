@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
-from app.adapters.openai_client import chat_completions_create, get_openai_client
+from app.adapters.openai_client import chat_completions_create
 from app.config import Settings
 from app.core.json_utils import extract_json_payload
 from app.core.pdf_text import PageText
@@ -1309,12 +1309,6 @@ def load_headings(doc_id: str, base_dir: Path, index_version: str) -> Dict[str, 
                 out[str(nid)] = payload
         return out
     return {}
-
-
-def load_tree(doc_id: str, base_dir: Path, index_version: str) -> Dict[str, TreeNode]:
-    path = base_dir / doc_id / index_version / "tree.json"
-    data = json.loads(path.read_text())
-    return {node_id: TreeNode(**payload) for node_id, payload in data.items()}
 
 
 def trace_path(nodes: Dict[str, TreeNode], node_id: str) -> List[TreeNode]:

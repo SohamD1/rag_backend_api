@@ -113,14 +113,6 @@ def _with_stage_metadata(payload: Dict[str, object]) -> Dict[str, object]:
     return enriched
 
 
-def _dump_model(obj: Any) -> Any:
-    if hasattr(obj, "model_dump"):
-        return obj.model_dump()
-    if hasattr(obj, "dict"):
-        return obj.dict()
-    return obj
-
-
 def _emit(
     on_event: Optional[Callable[[Dict[str, object]], None]],
     event: str,
