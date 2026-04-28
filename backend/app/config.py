@@ -35,8 +35,8 @@ def _normalize_optional_str(value: str | None) -> str | None:
 
 
 def _normalize_app_env(value: str) -> str:
-    value = str(value or "development").strip().lower()
-    return value or "development"
+    value = str(value or "production").strip().lower()
+    return value or "production"
 
 
 def _default_require_auth_for_env(app_env: str) -> bool:
@@ -45,7 +45,7 @@ def _default_require_auth_for_env(app_env: str) -> bool:
 
 @dataclass(frozen=True)
 class Settings:
-    app_env: str = _get_env("APP_ENV", "development")
+    app_env: str = _get_env("APP_ENV", "production")
     kb_app_token: str | None = _get_env("KB_APP_TOKEN", default=None)
     kb_admin_token: str | None = _get_env("KB_ADMIN_TOKEN", default=None)
     kb_require_auth: bool = False

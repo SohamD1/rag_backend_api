@@ -1,4 +1,6 @@
 from fastapi import APIRouter
+
+from app.api.security import KBAdminAuthDep
 from app.config import settings
 
 
@@ -10,7 +12,7 @@ def health_check():
     return {"status": "ok"}
 
 
-@router.get("/health/deps")
+@router.get("/health/deps", dependencies=[KBAdminAuthDep])
 def health_dependencies():
     return {
         "ok": bool(

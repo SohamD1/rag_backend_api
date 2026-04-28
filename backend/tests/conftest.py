@@ -60,13 +60,13 @@ def client():
     from app.api import rate_limit
     from app.api import deps
     from app.config import settings
-    from app.main import app
 
     old_require_auth = settings.kb_require_auth
     rate_limit._admin_limiter = None
     rate_limit._chat_limiter = None
     deps._vector_store = None
     object.__setattr__(settings, "kb_require_auth", False)
+    from app.main import app
 
     with TestClient(app) as test_client:
         yield test_client
