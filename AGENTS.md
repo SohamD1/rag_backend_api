@@ -1,7 +1,7 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-The application lives in `backend/`. Core API entrypoints are in `backend/app/api`, request orchestration and retrieval logic live in `backend/app/core`, provider integrations are in `backend/app/adapters`, persistence helpers are in `backend/app/storage`, and higher-level indexing services are in `backend/app/services`. Tests live in `backend/tests`. Operational notes and design writeups are in `docs/`. Use `scripts/ingest_folder.py` for ordered bulk PDF ingestion, and treat `data/` as local development storage.
+The application lives in `backend/`. Core API entrypoints are in `backend/app/api`, request orchestration and retrieval logic live in `backend/app/core`, provider integrations are in `backend/app/adapters`, persistence helpers are in `backend/app/storage`, and higher-level indexing services are in `backend/app/services`. Tests live in `backend/tests`. Keep the root `README.md` as the canonical project documentation. Use `scripts/ingest_folder.py` for ordered bulk PDF ingestion, and treat `data/` as local development storage.
 
 ## Build, Test, and Development Commands
 Run from `backend/` unless noted otherwise:
@@ -20,6 +20,9 @@ Pytest is the test framework. Add tests beside the affected behavior in `backend
 
 ## Commit & Pull Request Guidelines
 Recent commits use scoped, imperative subjects such as `backend: improve first-pass doc routing` and `docs: add setup notes`. Keep that pattern. PRs should include a short summary, test evidence (`python -m pytest` or targeted modules), and call out any `.env` changes, index schema bumps, or Pinecone layout impacts. For API changes, include example request/response snippets instead of screenshots.
+
+## Documentation Hygiene
+Keep durable setup, operation, and security guidance in the root `README.md`. Avoid adding one-off analysis reports or stale planning docs to the repository; use PR descriptions, issues, or external audit systems for temporary notes.
 
 ## Security, Configuration & Indexing Notes
 Copy `.env.example` to `.env` and never commit secrets. `MISTRAL_API_KEY` is required for PDF ingestion, and non-development environments should use `KB_APP_TOKEN` and `KB_ADMIN_TOKEN`. Pinecone is treated as empty for this repo: prefer forward-only ingestion and retrieval changes, and do not add migration, backfill, or dual-write logic unless explicitly requested.

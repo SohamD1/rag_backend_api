@@ -15,11 +15,11 @@ venv/
 # Data/artifacts
 data/
 .tmp/
+DELETE_ME_temp_cache_junk/
+backend/.tmp-tests/
+backend/.tmp_runtime_probe/
 backend/.tmp_tests/
 backend/.tmp_tests_runtime/
-
-# Local PDF drop folder (keep README in git, ignore PDFs)
-docs/**/*.pdf
 
 # OS/editor
 .DS_Store
