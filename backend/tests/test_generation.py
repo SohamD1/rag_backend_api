@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from app.core.generation import generate_answer, review_answer
+from app.core.generation import _limit_bullets, generate_answer, review_answer
 
 
 def _settings(**overrides):
@@ -88,3 +88,18 @@ def test_review_answer_fixes_exclusion_and_checklist_misses(monkeypatch):
     assert "improve answer completeness and instruction-following" in system_prompt
     assert "Do not include wills" in user_prompt
     assert answer.startswith("Besides a will")
+
+
+def test_limit_bullets_handles_common_bullet_markers():
+    answer = "\n".join(
+        [
+            "Intro.",
+            "- one",
+            "* two",
+            "\u2022 three",
+            "1. four",
+            "2. five",
+        ]
+    )
+
+    assert _limit_bullets(answer, max_bullets=3) == "Intro.\n- one\n* two\n\u2022 three"

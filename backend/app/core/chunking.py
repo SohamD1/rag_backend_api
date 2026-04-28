@@ -27,7 +27,7 @@ class _Block:
 
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
-_BULLET_RE = re.compile(r"^\s*(?:[-*•]|[0-9]+[.)]|[A-Za-z][.)])\s+")
+_BULLET_RE = re.compile(r"^\s*(?:[-*\u2022]|[0-9]+[.)]|[A-Za-z][.)])\s+")
 
 
 _HEADING_PREFIX_RE = re.compile(r"^\s*(?:\d+(?:\.\d+)*|[A-Z]|[IVXLC]+)[).:\-\s]+")

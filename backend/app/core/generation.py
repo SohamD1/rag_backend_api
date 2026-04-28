@@ -39,7 +39,7 @@ def _limit_bullets(answer: str, max_bullets: int = 10) -> str:
     bullet_indices = [
         idx
         for idx, line in enumerate(lines)
-        if re.match(r"^\s*(?:[-*•]|\d+\.)\s+", line)
+        if re.match(r"^\s*(?:[-*\u2022]|\d+\.)\s+", line)
     ]
     if len(bullet_indices) <= max_bullets:
         return text
