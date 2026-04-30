@@ -10,6 +10,8 @@ from dotenv import load_dotenv
 ROOT_DIR = Path(__file__).resolve().parents[2]
 load_dotenv(ROOT_DIR / ".env")
 
+DASHBOARD_TOKEN_SECRET_MIN_LENGTH = 32
+
 
 def _get_env(name: str, default=None, cast=str, required: bool = False):
     value = os.getenv(name, default)
@@ -47,7 +49,6 @@ def _default_require_auth_for_env(app_env: str) -> bool:
 class Settings:
     app_env: str = _get_env("APP_ENV", "production")
     kb_app_token: str | None = _get_env("KB_APP_TOKEN", default=None)
-    kb_admin_token: str | None = _get_env("KB_ADMIN_TOKEN", default=None)
     kb_require_auth: bool = False
     kb_require_auth_explicit: bool = False
 
@@ -181,6 +182,11 @@ class Settings:
     # Versioning
     index_schema_version: str = _get_env("INDEX_SCHEMA_VERSION", "v5")
 
+    # Admin dashboard
+    dashboard_totp_secret: str | None = _get_env("DASHBOARD_TOTP_SECRET", default=None)
+    dashboard_token_secret: str | None = _get_env("DASHBOARD_TOKEN_SECRET", default=None)
+    dashboard_token_ttl_seconds: int = _get_env("DASHBOARD_TOKEN_TTL_SECONDS", 28800, int)
+
     def __post_init__(self) -> None:
         app_env = _normalize_app_env(self.app_env)
         raw_require_auth = os.getenv("KB_REQUIRE_AUTH")
@@ -193,7 +199,16 @@ class Settings:
 
         object.__setattr__(self, "app_env", app_env)
         object.__setattr__(self, "kb_app_token", _normalize_optional_str(self.kb_app_token))
-        object.__setattr__(self, "kb_admin_token", _normalize_optional_str(self.kb_admin_token))
+        object.__setattr__(
+            self,
+            "dashboard_totp_secret",
+            _normalize_optional_str(self.dashboard_totp_secret),
+        )
+        object.__setattr__(
+            self,
+            "dashboard_token_secret",
+            _normalize_optional_str(self.dashboard_token_secret),
+        )
         object.__setattr__(self, "kb_require_auth", require_auth)
         object.__setattr__(self, "kb_require_auth_explicit", explicit_require_auth)
 
@@ -208,9 +223,19 @@ def validate_settings(s: Settings) -> None:
     missing: list[str] = []
     if not s.kb_app_token:
         missing.append("KB_APP_TOKEN")
-    if not s.kb_admin_token:
-        missing.append("KB_ADMIN_TOKEN")
-    if not missing:
+    if not s.dashboard_totp_secret:
+        missing.append("DASHBOARD_TOTP_SECRET")
+    if not s.dashboard_token_secret:
+        missing.append("DASHBOARD_TOKEN_SECRET")
+    invalid: list[str] = []
+    if (
+        s.dashboard_token_secret
+        and len(s.dashboard_token_secret) < DASHBOARD_TOKEN_SECRET_MIN_LENGTH
+    ):
+        invalid.append(
+            f"DASHBOARD_TOKEN_SECRET must be at least {DASHBOARD_TOKEN_SECRET_MIN_LENGTH} characters"
+        )
+    if not missing and not invalid:
         return
 
     if s.kb_require_auth_explicit:
@@ -218,9 +243,12 @@ def validate_settings(s: Settings) -> None:
     else:
         reason = f"APP_ENV={s.app_env} defaults auth to required outside development"
 
-    missing_list = ", ".join(missing)
+    problems = []
+    if missing:
+        problems.append(f"missing required env var(s): {', '.join(missing)}")
+    problems.extend(invalid)
     raise RuntimeError(
-        f"Authentication is required ({reason}) but missing required env var(s): {missing_list}"
+        f"Authentication is required ({reason}) but {'; '.join(problems)}"
     )
 
 

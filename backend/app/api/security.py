@@ -39,11 +39,4 @@ def require_kb_app_token(req: Request) -> None:
     _require_token(req=req, expected=settings.kb_app_token, kind="app")
 
 
-def require_kb_admin_token(req: Request) -> None:
-    if not settings.kb_require_auth:
-        return
-    _require_token(req=req, expected=settings.kb_admin_token, kind="admin")
-
-
 KBAppAuthDep = Depends(require_kb_app_token)
-KBAdminAuthDep = Depends(require_kb_admin_token)

@@ -4,13 +4,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi import File, Form, HTTPException, UploadFile
 
 from app.adapters.pinecone_store import PineconeVectorStore
 from app.api.deps import get_vector_store
 from app.api.schemas import DocumentCreateResponse, DocumentInfo, DocumentListResponse
-from app.api.security import KBAdminAuthDep
-from app.api.rate_limit import admin_rate_limit, make_rate_limit_dep
 from app.config import (
     resolve_docs_dir,
     resolve_storage_dir,
@@ -32,7 +30,6 @@ from app.storage.registry import DocMeta, DocRegistry, now_utc_iso
 from app.adapters.mistral_ocr import MistralOcrError, ocr_pdf_to_pages
 
 
-router = APIRouter()
 logger = logging.getLogger(__name__)
 
 DOCS_DIR = resolve_docs_dir(settings)
@@ -308,11 +305,6 @@ def _delete_local_document_artifacts(meta: DocMeta) -> None:
     registry.delete(meta.doc_id)
 
 
-@router.post(
-    "/documents",
-    response_model=DocumentCreateResponse,
-    dependencies=[KBAdminAuthDep, Depends(make_rate_limit_dep(admin_rate_limit))],
-)
 def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
     if file.content_type not in {"application/pdf", "application/octet-stream"}:
         raise HTTPException(status_code=400, detail="Only PDF uploads are supported.")
@@ -567,11 +559,6 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
                 )
 
 
-@router.get(
-    "/documents",
-    response_model=DocumentListResponse,
-    dependencies=[KBAdminAuthDep, Depends(make_rate_limit_dep(admin_rate_limit))],
-)
 def list_documents():
     metas = registry.list()
     docs = [
@@ -592,10 +579,6 @@ def list_documents():
     return DocumentListResponse(docs=docs)
 
 
-@router.delete(
-    "/documents/{doc_id}",
-    dependencies=[KBAdminAuthDep, Depends(make_rate_limit_dep(admin_rate_limit))],
-)
 def delete_document(doc_id: str):
     meta = registry.get(doc_id)
     if not meta:

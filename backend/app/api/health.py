@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 
-from app.api.security import KBAdminAuthDep
+from app.api.dashboard_auth import DashboardAuthDep
 from app.config import settings
 
 
@@ -12,7 +12,7 @@ def health_check():
     return {"status": "ok"}
 
 
-@router.get("/health/deps", dependencies=[KBAdminAuthDep])
+@router.get("/health/deps", dependencies=[DashboardAuthDep])
 def health_dependencies():
     return {
         "ok": bool(
