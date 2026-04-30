@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Knowledge Base Admin</title>
+    <link rel="stylesheet" href="/admin/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section id="loginView" class="login-view" hidden>
+        <form id="loginForm" class="login-panel" autocomplete="one-time-code">
+          <div>
+            <p class="eyebrow">Knowledge Base</p>
+            <h1>Admin Sign In</h1>
+          </div>
+          <label class="field">
+            <span>Verification Code</span>
+            <input
+              id="codeInput"
+              name="code"
+              inputmode="numeric"
+              pattern="[0-9]*"
+              autocomplete="one-time-code"
+              maxlength="8"
+              required
+            />
+          </label>
+          <button class="primary-button" type="submit">Sign In</button>
+          <p id="loginError" class="error" role="alert" hidden></p>
+        </form>
+      </section>
+
+      <section id="dashboardView" class="dashboard" hidden>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">Knowledge Base</p>
+            <h1>Documents</h1>
+          </div>
+          <button id="logoutButton" class="ghost-button" type="button">Sign Out</button>
+        </header>
+
+        <section class="upload-band">
+          <form id="uploadForm" class="upload-form">
+            <label class="file-picker">
+              <input id="pdfInput" name="file" type="file" accept="application/pdf,.pdf" required />
+              <span id="fileName">Select PDF</span>
+            </label>
+            <label class="source-field">
+              <span>Source Link</span>
+              <input id="sourceUrlInput" name="source_url" type="url" required />
+            </label>
+            <button id="uploadButton" class="primary-button" type="submit">Add Document</button>
+          </form>
+          <p id="uploadStatus" class="status-line" role="status"></p>
+        </section>
+
+        <section class="documents-section">
+          <div class="section-heading">
+            <h2>Ingested PDFs</h2>
+            <button id="refreshButton" class="icon-button" type="button" aria-label="Refresh documents">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M20 12a8 8 0 0 1-14.6 4.5M4 12A8 8 0 0 1 18.6 7.5" />
+                <path d="M6 17H3v3M18 7h3V4" />
+              </svg>
+            </button>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>PDF</th>
+                  <th>Source</th>
+                  <th>Pages</th>
+                  <th>Index</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="documentsBody"></tbody>
+            </table>
+            <div id="emptyState" class="empty-state" hidden>No documents ingested.</div>
+          </div>
+        </section>
+      </section>
+    </main>
+
+    <script src="/admin/app.js" defer></script>
+  </body>
+</html>
