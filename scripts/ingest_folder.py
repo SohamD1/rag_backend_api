@@ -149,19 +149,15 @@ def _build_matches(
 def _post_document(
     *,
     client: httpx.Client,
-    token: str | None,
+    dashboard_token: str,
     pdf_path: Path,
     source_url: str,
     timeout_seconds: float,
 ) -> dict[str, Any]:
-    headers: dict[str, str] = {}
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
-
     with pdf_path.open("rb") as f:
         resp = client.post(
-            "/api/v1/documents",
-            headers=headers,
+            "/api/admin/documents",
+            headers={"Authorization": f"Bearer {dashboard_token}"},
             data={"source_url": source_url},
             files={"file": (pdf_path.name, f, "application/pdf")},
             timeout=timeout_seconds,
@@ -181,6 +177,29 @@ def _post_document(
         return resp.json()
     except Exception as exc:
         raise UserFacingError(f"Upload returned non-JSON response: {resp.text[:500]}") from exc
+
+
+def _login_dashboard(*, client: httpx.Client, code: str, timeout_seconds: float) -> str:
+    resp = client.post(
+        "/api/admin/login",
+        json={"code": code},
+        timeout=timeout_seconds,
+    )
+    if resp.status_code >= 400:
+        detail = ""
+        try:
+            body = resp.json()
+            detail = body.get("detail") or ""
+        except Exception:
+            detail = resp.text[:500]
+        raise UserFacingError(f"Dashboard login failed ({resp.status_code}) detail={detail}")
+    try:
+        token = str(resp.json().get("token") or "").strip()
+    except Exception as exc:
+        raise UserFacingError(f"Dashboard login returned non-JSON response: {resp.text[:500]}") from exc
+    if not token:
+        raise UserFacingError("Dashboard login did not return a token.")
+    return token
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -217,9 +236,9 @@ def main(argv: list[str] | None = None) -> int:
         help="API base URL (default: env KB_API_BASE_URL or http://localhost:8000).",
     )
     parser.add_argument(
-        "--admin-token",
+        "--dashboard-code",
         default=None,
-        help="Admin token value (overrides env KB_ADMIN_TOKEN).",
+        help="Current dashboard TOTP code (overrides env DASHBOARD_TOTP_CODE).",
     )
     parser.add_argument(
         "--timeout",
@@ -289,12 +308,19 @@ def main(argv: list[str] | None = None) -> int:
             _eprint("Aborted.")
             return 1
 
-    token = (args.admin_token or os.getenv("KB_ADMIN_TOKEN") or "").strip() or None
+    dashboard_code = (args.dashboard_code or os.getenv("DASHBOARD_TOTP_CODE") or "").strip()
     api_base = str(args.api_base or "").strip().rstrip("/")
     if not api_base:
         raise UserFacingError("--api-base is empty.")
+    if not dashboard_code:
+        dashboard_code = input("Dashboard verification code: ").strip()
 
     with httpx.Client(base_url=api_base) as client:
+        dashboard_token = _login_dashboard(
+            client=client,
+            code=dashboard_code,
+            timeout_seconds=float(args.timeout),
+        )
         failures = 0
         for m in matches:
             pdf_path = Path(m["file_path"])
@@ -302,7 +328,7 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 result = _post_document(
                     client=client,
-                    token=token,
+                    dashboard_token=dashboard_token,
                     pdf_path=pdf_path,
                     source_url=source_url,
                     timeout_seconds=float(args.timeout),
