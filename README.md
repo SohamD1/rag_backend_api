@@ -41,7 +41,7 @@ Fill in the required provider values in `.env`:
 - `PINECONE_INDEX`
 - `PINECONE_HOST` if your Pinecone setup requires it
 - `MISTRAL_API_KEY` for PDF ingestion
-- `KB_APP_TOKEN` and `KB_ADMIN_TOKEN` for non-development environments
+- `KB_APP_TOKEN`, `DASHBOARD_TOTP_SECRET`, and `DASHBOARD_TOKEN_SECRET` for non-development environments
 
 Run the API:
 
@@ -65,12 +65,14 @@ Auth behavior:
 
 - `APP_ENV=development`, `dev`, `local`, or `test`: auth defaults off unless `KB_REQUIRE_AUTH=true`.
 - Any other `APP_ENV`: auth defaults on.
-- When auth is on, startup fails unless both `KB_APP_TOKEN` and `KB_ADMIN_TOKEN` are set.
+- When auth is on, startup fails unless `KB_APP_TOKEN`, `DASHBOARD_TOTP_SECRET`, and
+  `DASHBOARD_TOKEN_SECRET` are set.
 
 Token usage:
 
 - `Authorization: Bearer <KB_APP_TOKEN>` for `/api/v1/chat` and `/api/v1/chat/stream`
-- `Authorization: Bearer <KB_ADMIN_TOKEN>` for document admin endpoints
+- `POST /api/admin/login` with the current TOTP code returns a short-lived dashboard token.
+- `Authorization: Bearer <dashboard token>` for `/api/health/deps` and document admin endpoints
 
 Operational notes for audit readiness:
 
@@ -78,7 +80,7 @@ Operational notes for audit readiness:
 - `data/` is local runtime storage and is ignored by git.
 - Uploaded PDFs are processed transiently; the app persists metadata, tree artifacts, caches, and vectors, not the original upload for download.
 - Pinecone is treated as a clean corpus for this repo. If chunking, routing, tree, or vector schema changes, prefer a clean reingest over compatibility migrations unless a task explicitly requires migration support.
-- Keep production auth enabled and use separate app/admin tokens.
+- Keep production auth enabled and use separate app/dashboard secrets.
 
 ## Retrieval Strategy
 
@@ -95,9 +97,10 @@ This avoids scanning one large mixed namespace for every query and keeps index-v
 
 - `GET /api/health`
 - `GET /api/health/deps`
-- `POST /api/v1/documents` with multipart form fields `file` and `source_url`
-- `GET /api/v1/documents`
-- `DELETE /api/v1/documents/{doc_id}`
+- `POST /api/admin/login` with JSON `{ "code": "123456" }`
+- `POST /api/admin/documents` with multipart form fields `file` and `source_url`
+- `GET /api/admin/documents`
+- `DELETE /api/admin/documents/{doc_id}`
 - `POST /api/v1/chat` with JSON `{ "query": "...", "debug": false }`
 - `POST /api/v1/chat/stream`
 
@@ -111,4 +114,23 @@ Preview ordered PDF/source matches from the repo root:
 python scripts/ingest_folder.py --docs-dir "C:\path\to\pdfs" --sources-json "C:\path\to\sources.json"
 ```
 
-After reviewing the preview, add `--apply` to upload. Add `--yes` to skip the interactive prompt.
+After reviewing the preview, add `--apply` to upload. The script will prompt for the current
+dashboard verification code; pass `--dashboard-code 123456` to provide it up front. Add `--yes` to
+skip the upload confirmation prompt.
+
+## Admin Dashboard
+
+Run the API and open `/admin` on the same host to manage ingested PDFs.
+
+The dashboard uses the current one-time verification code to issue a short-lived bearer token for
+admin document requests. Keep the TOTP setup key and token secret in `.env`; do not put either
+secret in frontend code.
+
+Generate dashboard secrets:
+
+```powershell
+python -c "import base64, secrets; print('DASHBOARD_TOTP_SECRET=' + base64.b32encode(secrets.token_bytes(20)).decode().rstrip('=')); print('DASHBOARD_TOKEN_SECRET=' + secrets.token_urlsafe(48))"
+```
+
+Add `DASHBOARD_TOTP_SECRET` to Apple Passwords as the verification-code setup key for the admin
+login. `DASHBOARD_TOKEN_TTL_SECONDS` controls how long the dashboard stays signed in.
