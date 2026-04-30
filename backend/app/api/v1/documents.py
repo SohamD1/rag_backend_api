@@ -25,7 +25,7 @@ from app.core.index_version import compute_index_version
 from app.core.indexing import IndexBuildResult, build_standard_index, build_tree_index
 from app.core.tokens import estimate_tokens
 from app.core.vector_namespace import vector_namespace
-from app.storage.local_store import save_upload
+from app.storage.local_store import UploadRejectedError, save_upload
 from app.storage.registry import DocMeta, DocRegistry, now_utc_iso
 from app.adapters.mistral_ocr import MistralOcrError, ocr_pdf_to_pages
 
@@ -316,7 +316,14 @@ def create_document(file: UploadFile = File(...), source_url: str = Form(...)):
     vector_store: PineconeVectorStore | None = None
 
     try:
-        stored = save_upload(file, STORAGE_DIR)
+        stored = save_upload(
+            file,
+            STORAGE_DIR,
+            max_size_bytes=max(1, int(settings.max_upload_bytes)),
+        )
+    except UploadRejectedError as exc:
+        logger.info("upload_rejected stage=save_upload reason=%s", exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.exception("upload_failed stage=save_upload")
         raise HTTPException(status_code=500, detail=f"Failed to save upload: {exc}") from exc

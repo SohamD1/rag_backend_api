@@ -9,6 +9,16 @@ def test_health_check_remains_public(client):
 
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_api_docs_are_not_public_by_default(client):
+    assert client.get("/docs").status_code == 404
+    assert client.get("/openapi.json").status_code == 404
+
+    response = client.get("/")
+    assert response.status_code == 200
+    assert "docs_url" not in response.json()
 
 
 def test_dependency_health_requires_dashboard_auth(client):

@@ -153,6 +153,33 @@ def _meta(*, doc_id: str, storage_path: Path | None, source_url: str, page_count
     )
 
 
+def test_dashboard_upload_rejects_fake_pdf(dashboard_client):
+    response = dashboard_client.post(
+        "/api/admin/documents",
+        data={"source_url": "https://example.com/source.pdf"},
+        files={"file": ("doc.pdf", io.BytesIO(b"not a pdf"), "application/pdf")},
+    )
+
+    assert response.status_code == 400
+    assert "Only PDF" in response.json()["detail"]
+
+
+def test_dashboard_upload_rejects_oversized_pdf(dashboard_client):
+    old_max = settings.max_upload_bytes
+    try:
+        object.__setattr__(settings, "max_upload_bytes", 8)
+        response = dashboard_client.post(
+            "/api/admin/documents",
+            data={"source_url": "https://example.com/source.pdf"},
+            files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4 too large"), "application/pdf")},
+        )
+    finally:
+        object.__setattr__(settings, "max_upload_bytes", old_max)
+
+    assert response.status_code == 400
+    assert "exceeds" in response.json()["detail"]
+
+
 def test_exact_reupload_skips_ocr_when_unchanged(dashboard_client, monkeypatch, work_tmp):
     stored = _stored_file(work_tmp, "doc__abc12345")
     existing = _meta(
@@ -163,7 +190,7 @@ def test_exact_reupload_skips_ocr_when_unchanged(dashboard_client, monkeypatch, 
     fake_registry = FakeRegistry(existing)
 
     monkeypatch.setattr(documents, "registry", fake_registry)
-    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir, **kwargs: stored)
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("ocr_pdf_to_pages should not run for an exact no-op reupload")
@@ -196,7 +223,7 @@ def test_registry_failure_cleans_only_new_namespace(dashboard_client, monkeypatc
     vector_store = RecordingVectorStore()
 
     monkeypatch.setattr(documents, "registry", fake_registry)
-    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir, **kwargs: stored)
     monkeypatch.setattr(
         documents,
         "ocr_pdf_to_pages",
@@ -224,7 +251,7 @@ def test_successful_ingest_persists_index_only_metadata(dashboard_client, monkey
     vector_store = RecordingVectorStore()
 
     monkeypatch.setattr(documents, "registry", fake_registry)
-    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir, **kwargs: stored)
     monkeypatch.setattr(
         documents,
         "ocr_pdf_to_pages",
@@ -264,7 +291,7 @@ def test_successful_ingest_writes_multi_vector_summaries(
     vector_store = RecordingVectorStore()
 
     monkeypatch.setattr(documents, "registry", fake_registry)
-    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir, **kwargs: stored)
     monkeypatch.setattr(
         documents,
         "ocr_pdf_to_pages",
@@ -317,7 +344,7 @@ def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace
     )
 
     monkeypatch.setattr(documents, "registry", fake_registry)
-    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir, **kwargs: stored)
     monkeypatch.setattr(
         documents,
         "ocr_pdf_to_pages",
@@ -360,7 +387,7 @@ def test_checksum_duplicate_reuses_existing_doc_identity(dashboard_client, monke
     fake_registry = FakeRegistry(existing)
 
     monkeypatch.setattr(documents, "registry", fake_registry)
-    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir: stored)
+    monkeypatch.setattr(documents, "save_upload", lambda file, storage_dir, **kwargs: stored)
 
     def fail_if_called(*args, **kwargs):
         raise AssertionError("ocr_pdf_to_pages should not run for a checksum-identical reupload")

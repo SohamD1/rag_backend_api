@@ -21,11 +21,20 @@ class StoredFile:
     created: bool
 
 
+class UploadRejectedError(ValueError):
+    pass
+
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
 
-def save_upload(upload: UploadFile, storage_dir: Path) -> StoredFile:
+def save_upload(
+    upload: UploadFile,
+    storage_dir: Path,
+    *,
+    max_size_bytes: int,
+) -> StoredFile:
     """
     Save the upload to a temporary local path for OCR/indexing.
     The caller is responsible for deleting the file after ingest completes.
@@ -39,14 +48,27 @@ def save_upload(upload: UploadFile, storage_dir: Path) -> StoredFile:
     tmp_path = storage_dir / f".upload_{uuid4().hex}{suffix}"
     hasher = sha256()
     size_bytes = 0
-    with tmp_path.open("wb") as f:
-        while True:
-            chunk = upload.file.read(1024 * 1024)
-            if not chunk:
-                break
-            f.write(chunk)
-            hasher.update(chunk)
-            size_bytes += len(chunk)
+    try:
+        with tmp_path.open("wb") as f:
+            while True:
+                chunk = upload.file.read(1024 * 1024)
+                if not chunk:
+                    break
+                if size_bytes == 0 and not chunk.startswith(b"%PDF-"):
+                    raise UploadRejectedError("Only PDF files are supported.")
+                size_bytes += len(chunk)
+                if size_bytes > max_size_bytes:
+                    raise UploadRejectedError(
+                        f"PDF upload exceeds the {max_size_bytes} byte limit."
+                    )
+                f.write(chunk)
+                hasher.update(chunk)
+        if size_bytes <= 0:
+            raise UploadRejectedError("PDF upload is empty.")
+    except Exception:
+        if tmp_path.exists():
+            tmp_path.unlink()
+        raise
 
     checksum = hasher.hexdigest()
     doc_id = f"{slug}__{checksum[:8]}"

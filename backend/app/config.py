@@ -45,12 +45,17 @@ def _default_require_auth_for_env(app_env: str) -> bool:
     return app_env not in {"development", "dev", "local", "test"}
 
 
+def _default_enable_docs_for_env(app_env: str) -> bool:
+    return app_env in {"development", "dev", "local", "test"}
+
+
 @dataclass(frozen=True)
 class Settings:
     app_env: str = _get_env("APP_ENV", "production")
     kb_app_token: str | None = _get_env("KB_APP_TOKEN", default=None)
     kb_require_auth: bool = False
     kb_require_auth_explicit: bool = False
+    kb_enable_docs: bool = False
 
     # OpenAI
     # Keep optional so the app can boot and answer `/api/health` even when secrets
@@ -101,6 +106,7 @@ class Settings:
     tree_dir: str | None = _get_env("TREE_DIR", default=None)
     local_storage_dir: str | None = _get_env("LOCAL_STORAGE_DIR", default=None)
     cache_dir: str = _get_env("CACHE_DIR", "./data/cache")
+    max_upload_bytes: int = _get_env("MAX_UPLOAD_BYTES", 50 * 1024 * 1024, int)
 
     # Routing
     page_tree_threshold: int = _get_env("PAGE_TREE_THRESHOLD", 50, int)
@@ -196,6 +202,12 @@ class Settings:
             if explicit_require_auth
             else _default_require_auth_for_env(app_env)
         )
+        raw_enable_docs = os.getenv("KB_ENABLE_DOCS")
+        enable_docs = (
+            _bool_env(raw_enable_docs)
+            if raw_enable_docs is not None and raw_enable_docs != ""
+            else _default_enable_docs_for_env(app_env)
+        )
 
         object.__setattr__(self, "app_env", app_env)
         object.__setattr__(self, "kb_app_token", _normalize_optional_str(self.kb_app_token))
@@ -211,6 +223,7 @@ class Settings:
         )
         object.__setattr__(self, "kb_require_auth", require_auth)
         object.__setattr__(self, "kb_require_auth_explicit", explicit_require_auth)
+        object.__setattr__(self, "kb_enable_docs", enable_docs)
 
 
 settings = Settings()
