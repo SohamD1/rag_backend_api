@@ -4,6 +4,9 @@ import io
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from app.api.dashboard_auth import totp_code
 from app.api.v1 import documents
 from app.config import settings
 from app.core.index_version import compute_index_version
@@ -11,6 +14,31 @@ from app.core.pdf_text import PageText
 from app.core.vector_namespace import vector_namespace
 from app.storage.local_store import StoredFile
 from app.storage.registry import DocMeta
+
+
+DASHBOARD_TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+
+
+@pytest.fixture
+def dashboard_client(client):
+    old_totp = settings.dashboard_totp_secret
+    old_token_secret = settings.dashboard_token_secret
+    try:
+        object.__setattr__(settings, "dashboard_totp_secret", DASHBOARD_TOTP_SECRET)
+        object.__setattr__(settings, "dashboard_token_secret", "x" * 48)
+
+        response = client.post(
+            "/api/admin/login",
+            json={"code": totp_code(DASHBOARD_TOTP_SECRET)},
+        )
+        assert response.status_code == 200
+        token = response.json()["token"]
+        client.headers.update({"Authorization": f"Bearer {token}"})
+        yield client
+    finally:
+        object.__setattr__(settings, "dashboard_totp_secret", old_totp)
+        object.__setattr__(settings, "dashboard_token_secret", old_token_secret)
+        client.headers.pop("Authorization", None)
 
 
 class FakeRegistry:
@@ -125,7 +153,7 @@ def _meta(*, doc_id: str, storage_path: Path | None, source_url: str, page_count
     )
 
 
-def test_exact_reupload_skips_ocr_when_unchanged(client, monkeypatch, work_tmp):
+def test_exact_reupload_skips_ocr_when_unchanged(dashboard_client, monkeypatch, work_tmp):
     stored = _stored_file(work_tmp, "doc__abc12345")
     existing = _meta(
         doc_id=stored.doc_id,
@@ -142,8 +170,8 @@ def test_exact_reupload_skips_ocr_when_unchanged(client, monkeypatch, work_tmp):
 
     monkeypatch.setattr(documents, "ocr_pdf_to_pages", fail_if_called)
 
-    response = client.post(
-        "/api/v1/documents",
+    response = dashboard_client.post(
+        "/api/admin/documents",
         data={"source_url": existing.source_url},
         files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
     )
@@ -156,7 +184,7 @@ def test_exact_reupload_skips_ocr_when_unchanged(client, monkeypatch, work_tmp):
     assert payload["file_url"] is None
 
 
-def test_registry_failure_cleans_only_new_namespace(client, monkeypatch, work_tmp):
+def test_registry_failure_cleans_only_new_namespace(dashboard_client, monkeypatch, work_tmp):
     stored = _stored_file(work_tmp, "doc__abc12345")
     existing = _meta(
         doc_id=stored.doc_id,
@@ -178,8 +206,8 @@ def test_registry_failure_cleans_only_new_namespace(client, monkeypatch, work_tm
     monkeypatch.setattr("app.core.indexing.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
     monkeypatch.setattr("app.core.doc_summaries.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
 
-    response = client.post(
-        "/api/v1/documents",
+    response = dashboard_client.post(
+        "/api/admin/documents",
         data={"source_url": "https://example.com/new.pdf"},
         files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
     )
@@ -190,7 +218,7 @@ def test_registry_failure_cleans_only_new_namespace(client, monkeypatch, work_tm
     assert vector_namespace(stored.doc_id, existing.index_version) not in vector_store.cleared
 
 
-def test_successful_ingest_persists_index_only_metadata(client, monkeypatch, work_tmp):
+def test_successful_ingest_persists_index_only_metadata(dashboard_client, monkeypatch, work_tmp):
     stored = _stored_file(work_tmp, "doc__abc12345")
     fake_registry = FakeRegistry(None)
     vector_store = RecordingVectorStore()
@@ -206,8 +234,8 @@ def test_successful_ingest_persists_index_only_metadata(client, monkeypatch, wor
     monkeypatch.setattr("app.core.indexing.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
     monkeypatch.setattr("app.core.doc_summaries.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
 
-    response = client.post(
-        "/api/v1/documents",
+    response = dashboard_client.post(
+        "/api/admin/documents",
         data={"source_url": "https://example.com/new.pdf"},
         files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
     )
@@ -229,7 +257,7 @@ def test_successful_ingest_persists_index_only_metadata(client, monkeypatch, wor
 
 
 def test_successful_ingest_writes_multi_vector_summaries(
-    client, monkeypatch, work_tmp
+    dashboard_client, monkeypatch, work_tmp
 ):
     stored = _stored_file(work_tmp, "doc__abc12345")
     fake_registry = FakeRegistry(None)
@@ -246,8 +274,8 @@ def test_successful_ingest_writes_multi_vector_summaries(
     monkeypatch.setattr("app.core.indexing.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
     monkeypatch.setattr("app.core.doc_summaries.embed_texts", lambda texts, settings: [[0.1, 0.2] for _ in texts])
 
-    response = client.post(
-        "/api/v1/documents",
+    response = dashboard_client.post(
+        "/api/admin/documents",
         data={"source_url": "https://example.com/new.pdf"},
         files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
     )
@@ -268,7 +296,7 @@ def test_successful_ingest_writes_multi_vector_summaries(
 
 
 def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace(
-    client, monkeypatch, work_tmp
+    dashboard_client, monkeypatch, work_tmp
 ):
     stored = _stored_file(work_tmp, "doc__abc12345")
     previous_meta = _meta(
@@ -304,8 +332,8 @@ def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace
 
     monkeypatch.setattr(documents, "upsert_doc_summaries", fail_doc_summary)
 
-    response = client.post(
-        "/api/v1/documents",
+    response = dashboard_client.post(
+        "/api/admin/documents",
         data={"source_url": "https://example.com/new.pdf"},
         files={"file": ("doc.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
     )
@@ -322,7 +350,7 @@ def test_doc_summary_failure_restores_previous_registry_and_cleans_new_namespace
     assert vector_namespace(stored.doc_id, previous_meta.index_version) not in vector_store.cleared
 
 
-def test_checksum_duplicate_reuses_existing_doc_identity(client, monkeypatch, work_tmp):
+def test_checksum_duplicate_reuses_existing_doc_identity(dashboard_client, monkeypatch, work_tmp):
     stored = _stored_file(work_tmp, "renamed__abc12345", slug="renamed")
     existing = _meta(
         doc_id="doc__abc12345",
@@ -339,8 +367,8 @@ def test_checksum_duplicate_reuses_existing_doc_identity(client, monkeypatch, wo
 
     monkeypatch.setattr(documents, "ocr_pdf_to_pages", fail_if_called)
 
-    response = client.post(
-        "/api/v1/documents",
+    response = dashboard_client.post(
+        "/api/admin/documents",
         data={"source_url": existing.source_url},
         files={"file": ("renamed.pdf", io.BytesIO(b"%PDF-1.4"), "application/pdf")},
     )

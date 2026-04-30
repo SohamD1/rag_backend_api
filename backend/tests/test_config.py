@@ -33,7 +33,37 @@ def test_kb_require_auth_can_explicitly_opt_out(monkeypatch):
 
 def test_validate_settings_fails_closed_without_tokens(monkeypatch):
     monkeypatch.delenv("KB_REQUIRE_AUTH", raising=False)
-    settings = Settings(app_env="", kb_app_token=None, kb_admin_token=None)
+    settings = Settings(
+        app_env="",
+        kb_app_token=None,
+        dashboard_totp_secret=None,
+        dashboard_token_secret=None,
+    )
 
     with pytest.raises(RuntimeError, match="Authentication is required"):
+        validate_settings(settings)
+
+
+def test_validate_settings_accepts_dashboard_admin_auth(monkeypatch):
+    monkeypatch.delenv("KB_REQUIRE_AUTH", raising=False)
+    settings = Settings(
+        app_env="",
+        kb_app_token="app-token",
+        dashboard_totp_secret="JBSWY3DPEHPK3PXP",
+        dashboard_token_secret="x" * 48,
+    )
+
+    validate_settings(settings)
+
+
+def test_validate_settings_rejects_short_dashboard_token_secret(monkeypatch):
+    monkeypatch.delenv("KB_REQUIRE_AUTH", raising=False)
+    settings = Settings(
+        app_env="",
+        kb_app_token="app-token",
+        dashboard_totp_secret="JBSWY3DPEHPK3PXP",
+        dashboard_token_secret="short",
+    )
+
+    with pytest.raises(RuntimeError, match="DASHBOARD_TOKEN_SECRET must be at least 32"):
         validate_settings(settings)

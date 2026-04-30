@@ -3,11 +3,12 @@ import os
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
+from app.api.admin import router as admin_router
 from app.api.health import router as health_router
 from app.api.v1.chat import router as chat_v1_router
-from app.api.v1.documents import router as documents_v1_router
-from app.config import settings, validate_settings
+from app.config import ROOT_DIR, settings, validate_settings
 
 
 def _configure_logging() -> None:
@@ -39,8 +40,12 @@ app.add_middleware(
 )
 
 app.include_router(health_router, prefix="/api")
-app.include_router(documents_v1_router, prefix="/api/v1")
+app.include_router(admin_router, prefix="/api")
 app.include_router(chat_v1_router, prefix="/api/v1")
+
+FRONTEND_DIR = ROOT_DIR / "frontend"
+if FRONTEND_DIR.exists():
+    app.mount("/admin", StaticFiles(directory=FRONTEND_DIR, html=True), name="admin")
 
 
 @app.get("/", include_in_schema=False)
