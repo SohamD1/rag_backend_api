@@ -16,10 +16,28 @@ def test_auth_defaults_required_when_app_env_is_omitted(monkeypatch):
 
 def test_development_env_is_explicit_local_auth_opt_out(monkeypatch):
     monkeypatch.delenv("KB_REQUIRE_AUTH", raising=False)
+    monkeypatch.delenv("KB_ENABLE_DOCS", raising=False)
 
     settings = Settings(app_env="development")
 
     assert settings.kb_require_auth is False
+    assert settings.kb_enable_docs is True
+
+
+def test_docs_default_off_in_production(monkeypatch):
+    monkeypatch.delenv("KB_ENABLE_DOCS", raising=False)
+
+    settings = Settings(app_env="production")
+
+    assert settings.kb_enable_docs is False
+
+
+def test_docs_can_be_explicitly_enabled(monkeypatch):
+    monkeypatch.setenv("KB_ENABLE_DOCS", "true")
+
+    settings = Settings(app_env="production")
+
+    assert settings.kb_enable_docs is True
 
 
 def test_kb_require_auth_can_explicitly_opt_out(monkeypatch):

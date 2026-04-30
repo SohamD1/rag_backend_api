@@ -67,6 +67,7 @@ Auth behavior:
 - Any other `APP_ENV`: auth defaults on.
 - When auth is on, startup fails unless `KB_APP_TOKEN`, `DASHBOARD_TOTP_SECRET`, and
   `DASHBOARD_TOKEN_SECRET` are set.
+- Interactive API docs are off outside local/test environments unless `KB_ENABLE_DOCS=true`.
 
 Token usage:
 
@@ -79,6 +80,7 @@ Operational notes for audit readiness:
 - Secrets stay outside git in environment variables.
 - `data/` is local runtime storage and is ignored by git.
 - Uploaded PDFs are processed transiently; the app persists metadata, tree artifacts, caches, and vectors, not the original upload for download.
+- PDF uploads are capped by `MAX_UPLOAD_BYTES` and rejected unless the file starts with a PDF header.
 - Pinecone is treated as a clean corpus for this repo. If chunking, routing, tree, or vector schema changes, prefer a clean reingest over compatibility migrations unless a task explicitly requires migration support.
 - Keep production auth enabled and use separate app/dashboard secrets.
 

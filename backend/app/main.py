@@ -1,9 +1,12 @@
 import logging
 import os
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import Response
 
 from app.api.admin import router as admin_router
 from app.api.health import router as health_router
@@ -26,7 +29,55 @@ def _configure_logging() -> None:
 _configure_logging()
 validate_settings(settings)
 
-app = FastAPI(title="RAG Backend API", version="1.0.0")
+app = FastAPI(
+    title="RAG Backend API",
+    version="1.0.0",
+    docs_url="/docs" if settings.kb_enable_docs else None,
+    redoc_url="/redoc" if settings.kb_enable_docs else None,
+    openapi_url="/openapi.json" if settings.kb_enable_docs else None,
+)
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        response = await call_next(request)
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("Referrer-Policy", "no-referrer")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; base-uri 'none'; form-action 'self'; "
+            "frame-ancestors 'none'; img-src 'self' data:; "
+            "script-src 'self'; style-src 'self'; connect-src 'self'",
+        )
+        if settings.app_env not in {"development", "dev", "local", "test"}:
+            response.headers.setdefault(
+                "Strict-Transport-Security",
+                "max-age=31536000; includeSubDomains",
+            )
+        return response
+
+
+class UploadSizeLimitMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next) -> Response:
+        if request.method == "POST" and request.url.path == "/api/admin/documents":
+            raw_length = request.headers.get("content-length")
+            if raw_length:
+                try:
+                    content_length = int(raw_length)
+                except ValueError:
+                    content_length = 0
+                multipart_overhead = 1024 * 1024
+                if content_length > max(1, int(settings.max_upload_bytes)) + multipart_overhead:
+                    return JSONResponse(
+                        status_code=413,
+                        content={"detail": "PDF upload is too large."},
+                    )
+        return await call_next(request)
+
+
+app.add_middleware(UploadSizeLimitMiddleware)
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -50,9 +101,11 @@ if FRONTEND_DIR.exists():
 
 @app.get("/", include_in_schema=False)
 def root() -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "name": "RAG Backend API",
         "version": "1.0.0",
-        "docs_url": "/docs",
         "health_url": "/api/health",
     }
+    if settings.kb_enable_docs:
+        payload["docs_url"] = "/docs"
+    return payload
